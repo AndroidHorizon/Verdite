@@ -226,19 +226,37 @@ LoadedSo* elfLoad(const char* path) {
         if (!write_alloc) { free(file_data); compatLog("ELF: memalign failed"); return nullptr; }
     }
 
-    memset(write_alloc, 0, alloc_size);
-    uint8_t* write_base = write_alloc - min_vaddr;  // for writes
-    uint8_t* exec_base  = exec_alloc  - min_vaddr;  // for exec-side addresses stored in GOT
+    // ── Use heap staging buffer so JIT memory is only touched once ──────────
+    // All ELF processing (segment copy, relocation) happens on a heap buffer.
+    // Only one bulk memcpy goes to the JIT writable region, right before
+    // jitTransitionToExecutable.  This avoids random small writes to JIT pages,
+    // which can fault on some Switch firmware if the mapping state is unexpected.
+    uint8_t* stage = (uint8_t*)malloc(alloc_size);
+    if (!stage) {
+        compatLog("ELF: malloc staging buffer OOM");
+        if (using_jit) jitClose(&jit_mem);
+        else           free(write_alloc);
+        free(file_data);
+        return nullptr;
+    }
+    compatLog("ELF: stage alloc OK");
+    memset(stage, 0, alloc_size);
+    compatLog("ELF: stage zeroed");
 
-    // ── Copy PT_LOAD segments into writable mapping ──────────────────────────
+    // stage_base: same offset math as write_base but in heap memory
+    uint8_t* stage_base = stage - min_vaddr;
+    uint8_t* exec_base  = exec_alloc - min_vaddr;  // exec-side addresses for GOT
+
+    // ── Copy PT_LOAD segments into staging buffer ────────────────────────────
     for (int i = 0; i < ehdr->e_phnum; i++) {
         const Elf64_Phdr& ph = phdrs[i];
         if (ph.p_type != PT_LOAD || ph.p_filesz == 0) continue;
         if (ph.p_offset + ph.p_filesz > fsize) continue;
-        memcpy(write_base + ph.p_vaddr, file_data + ph.p_offset, ph.p_filesz);
+        memcpy(stage_base + ph.p_vaddr, file_data + ph.p_offset, ph.p_filesz);
     }
+    compatLog("ELF: segs copied to stage");
 
-    // ── Parse PT_DYNAMIC from writable mapping ───────────────────────────────
+    // ── Parse PT_DYNAMIC from staging buffer ─────────────────────────────────
     uint64_t strtab_vaddr = 0, symtab_vaddr = 0;
     uint64_t rela_vaddr = 0, rela_sz = 0;
     uint64_t jmprel_vaddr = 0, jmprel_sz = 0;
@@ -247,8 +265,8 @@ LoadedSo* elfLoad(const char* path) {
 
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdrs[i].p_type != PT_DYNAMIC) continue;
-        const Elf64_Dyn* dyn = (const Elf64_Dyn*)(write_base + phdrs[i].p_vaddr);
-        for (; dyn->d_tag != DT_NULL; dyn++) {
+        const Elf64_Dyn* dyn = (const Elf64_Dyn*)(stage_base + phdrs[i].p_vaddr);
+        for (int d = 0; d < 4096 && dyn->d_tag != DT_NULL; dyn++, d++) {
             switch (dyn->d_tag) {
                 case DT_STRTAB:      strtab_vaddr   = dyn->d_un.d_ptr; break;
                 case DT_SYMTAB:      symtab_vaddr   = dyn->d_un.d_ptr; break;
@@ -264,48 +282,61 @@ LoadedSo* elfLoad(const char* path) {
         }
         break;
     }
+    compatLogFmt("ELF: dyn: strtab=0x%llx/%llu symtab=0x%llx syment=%llu "
+                 "rela=0x%llx/%llu jmprel=0x%llx/%llu init_arr=0x%llx/%llu",
+                 (unsigned long long)strtab_vaddr, (unsigned long long)strsz,
+                 (unsigned long long)symtab_vaddr, (unsigned long long)syment,
+                 (unsigned long long)rela_vaddr,   (unsigned long long)rela_sz,
+                 (unsigned long long)jmprel_vaddr, (unsigned long long)jmprel_sz,
+                 (unsigned long long)init_arr_vaddr,(unsigned long long)init_arr_sz);
 
-    // ── Build LoadedSo, point strtab/symtab at writable side for now ─────────
+    // ── Build LoadedSo — strtab/symtab point into staging buffer ─────────────
     LoadedSo* so = new LoadedSo();
     so->using_jit  = using_jit;
     so->jit_mem    = jit_mem;
     so->alloc      = exec_alloc;
     so->alloc_size = alloc_size;
     so->min_vaddr  = min_vaddr;
-    so->base       = exec_base;   // exec-side base: base+vaddr = runtime address
+    so->base       = exec_base;
     so->path       = path;
 
     uint32_t sym_count = 0;
-    if (strtab_vaddr) so->strtab = (const char*)(write_base + strtab_vaddr);
+    if (strtab_vaddr) so->strtab = (const char*)(stage_base + strtab_vaddr);
     if (symtab_vaddr && strtab_vaddr && syment) {
-        so->symtab = (Elf64_Sym*)(write_base + symtab_vaddr);
+        so->symtab = (Elf64_Sym*)(stage_base + symtab_vaddr);
         if (strtab_vaddr > symtab_vaddr)
             sym_count = (uint32_t)((strtab_vaddr - symtab_vaddr) / syment);
         if (sym_count > 200000) sym_count = 200000;
         so->sym_count = sym_count;
     }
+    compatLogFmt("ELF: so built sym_count=%u", sym_count);
 
     // Register now so cross-library resolution works during relocation
     g_loaded_sos.push_back(so);
+    compatLog("ELF: registered");
 
-    // ── Apply relocations ────────────────────────────────────────────────────
-    // GOT entries receive exec-side addresses; writes go to the writable mapping.
+    // ── Apply relocations to staging buffer ──────────────────────────────────
+    // GOT entries store exec-side addresses; the writes go to the heap stage.
     if (rela_vaddr && rela_sz && so->symtab) {
-        applyRela(so, (const Elf64_Rela*)(write_base + rela_vaddr),
+        compatLogFmt("ELF: rela %llu entries", (unsigned long long)(rela_sz / sizeof(Elf64_Rela)));
+        applyRela(so, (const Elf64_Rela*)(stage_base + rela_vaddr),
                   rela_sz / sizeof(Elf64_Rela),
-                  write_base, exec_base, write_alloc, alloc_size);
+                  stage_base, exec_base, stage, alloc_size);
     }
+    compatLog("ELF: rela done");
     if (jmprel_vaddr && jmprel_sz && so->symtab) {
-        applyRela(so, (const Elf64_Rela*)(write_base + jmprel_vaddr),
+        compatLogFmt("ELF: jmprel %llu entries", (unsigned long long)(jmprel_sz / sizeof(Elf64_Rela)));
+        applyRela(so, (const Elf64_Rela*)(stage_base + jmprel_vaddr),
                   jmprel_sz / sizeof(Elf64_Rela),
-                  write_base, exec_base, write_alloc, alloc_size);
+                  stage_base, exec_base, stage, alloc_size);
     }
+    compatLog("ELF: jmprel done");
 
-    // ── Copy strtab/symtab to heap before JIT transition unmaps the RW side ──
+    // ── Copy strtab/symtab to heap before staging buffer is freed ────────────
     if (strtab_vaddr && strsz) {
         so->strtab_heap = (char*)malloc(strsz + 1);
         if (so->strtab_heap) {
-            memcpy(so->strtab_heap, write_base + strtab_vaddr, strsz);
+            memcpy(so->strtab_heap, stage_base + strtab_vaddr, strsz);
             so->strtab_heap[strsz] = '\0';
             so->strtab = so->strtab_heap;
         }
@@ -314,10 +345,21 @@ LoadedSo* elfLoad(const char* path) {
         size_t symtab_bytes = (size_t)sym_count * sizeof(Elf64_Sym);
         so->symtab_heap = (Elf64_Sym*)malloc(symtab_bytes);
         if (so->symtab_heap) {
-            memcpy(so->symtab_heap, write_base + symtab_vaddr, symtab_bytes);
+            memcpy(so->symtab_heap, stage_base + symtab_vaddr, symtab_bytes);
             so->symtab = so->symtab_heap;
         }
     }
+    compatLog("ELF: strtab/symtab copied");
+
+    // ── Bulk-copy staging buffer into JIT writable region ────────────────────
+    // Only one memcpy to JIT memory, avoiding many small random writes.
+    if (using_jit) {
+        compatLogFmt("ELF: copying stage->JIT rw=%p size=0x%zx", (void*)write_alloc, alloc_size);
+        memcpy(write_alloc, stage, alloc_size);
+        compatLog("ELF: stage->JIT copy done");
+    }
+    free(stage);
+    compatLog("ELF: stage freed");
 
     // ── Transition to executable ─────────────────────────────────────────────
     uint32_t this_svc_perm_code = 0;
