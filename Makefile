@@ -38,6 +38,7 @@ LIBS	:=	-lSDL2_ttf -lSDL2_image -lSDL2main -lSDL2 \
 			-lfreetype -lharfbuzz \
 			-lpng -ljpeg -lwebp -lwebpdemux \
 			-lminizip -lbz2 -lz \
+			-lcurl -lmbedtls -lmbedx509 -lmbedcrypto \
 			-lEGL -lGLESv2 -lglapi -ldrm_nouveau \
 			-lnx
 

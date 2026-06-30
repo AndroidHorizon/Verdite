@@ -12,6 +12,7 @@
 #include "apk.h"
 #include "compat/loader.h"
 #include "build_number.h"
+#include "avatar.h"
 
 static const char* APK_DIR  = "sdmc:/BareDroidNX/apks";
 static const char* LOG_FILE = "sdmc:/BareDroidNX/log.txt";
@@ -69,6 +70,7 @@ static const int BTN_B     = 1;
 static const int BTN_X     = 2;
 static const int BTN_Y     = 3;
 static const int BTN_PLUS  = 10;
+static const int BTN_MINUS = 11;
 
 // ---------------------------------------------------------------------------
 struct App {
@@ -82,6 +84,8 @@ struct App {
     std::vector<SDL_Texture*> icons;
     int selected = 0;
     int scroll   = 0;
+
+    SDL_Texture* avatarTex = nullptr;  // live GitHub avatar, swapped in by showAbout()
 
     // ------------------------------------------------------------------
     TTF_Font* openFont(int ptsize) {
@@ -159,6 +163,8 @@ struct App {
 
     // ------------------------------------------------------------------
     void cleanup() {
+        avatarStop();
+        if (avatarTex) SDL_DestroyTexture(avatarTex);
         for (auto* t : icons) if (t) SDL_DestroyTexture(t);
         if (fLg)  TTF_CloseFont(fLg);
         if (fSm)  TTF_CloseFont(fSm);
@@ -345,7 +351,7 @@ struct App {
             drawText(fSm, "Docked — games need handheld (touch screen)     +: Quit",
                 C_WARN, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         } else {
-            drawText(fSm, "A: Launch     X: Reinstall     Y: Rescan     +: Quit",
+            drawText(fSm, "A: Launch     X: Reinstall     Y: Rescan     -: About     +: Quit",
                 C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         }
 
@@ -513,6 +519,72 @@ struct App {
             SDL_Delay(16);
         }
     }
+
+    // ------------------------------------------------------------------
+    // About screen — shows the live GitHub avatar fetched by avatar.cpp.
+    // Polls avatarPollNewImage() every frame so the picture updates in
+    // place if it changes on GitHub while this screen stays open.
+    // ------------------------------------------------------------------
+    void showAbout() {
+        bool done = false;
+        while (!done) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) { done = true; }
+                if (ev.type == SDL_JOYBUTTONDOWN &&
+                    (ev.jbutton.button == BTN_B || ev.jbutton.button == BTN_MINUS)) { done = true; }
+                if (ev.type == SDL_KEYDOWN &&
+                    ev.key.keysym.sym == SDLK_ESCAPE) { done = true; }
+            }
+
+            std::vector<uint8_t> img;
+            if (avatarPollNewImage(img)) {
+                SDL_RWops* rw = SDL_RWFromConstMem(img.data(), (int)img.size());
+                SDL_Surface* surf = IMG_Load_RW(rw, 1);
+                if (surf) {
+                    if (avatarTex) SDL_DestroyTexture(avatarTex);
+                    avatarTex = SDL_CreateTextureFromSurface(rdr, surf);
+                    SDL_FreeSurface(surf);
+                }
+            }
+
+            fill(0, 0, SW, SH, C_BG);
+            fill(0, 0, SW, HEADER_H, C_HEADER);
+            drawText(fLg, "BareDroidNX", C_WHITE, 30, (HEADER_H - 28) / 2);
+
+            int avSz = 160;
+            int avX  = (SW - avSz) / 2;
+            int avY  = LIST_Y + 30;
+            if (avatarTex) {
+                SDL_Rect dst = {avX, avY, avSz, avSz};
+                SDL_RenderCopy(rdr, avatarTex, nullptr, &dst);
+            } else {
+                drawMonogram("BareDroidNX", avX, avY, avSz);
+                drawText(fSm, "Fetching avatar...", C_DIM,
+                         (SW - 0) / 2, avY + avSz + 10);
+            }
+
+            int y = avY + avSz + 40;
+            auto center = [&](TTF_Font* f, const std::string& s, SDL_Color col) {
+                int w = 0, h = 0;
+                TTF_SizeUTF8(f, s.c_str(), &w, &h);
+                drawText(f, s, col, (SW - w) / 2, y);
+                y += h + 10;
+            };
+            center(fLg, "BareDroidNX", C_WHITE);
+            center(fSm, BUILD_VERSION, C_DIM);
+            center(fSm, "by aaronworld.uk", C_GRAY);
+            y += 10;
+            center(fSm, "Android NDK compatibility layer for Nintendo Switch", C_GRAY);
+
+            fill(0, SH - FOOTER_H, SW, FOOTER_H, C_FOOTER);
+            drawText(fSm, "B: Back to menu",
+                     C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+
+            SDL_RenderPresent(rdr);
+            SDL_Delay(16);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -531,6 +603,7 @@ int main(int, char**) {
     g_app_ptr = &app;
 
     if (!app.init()) return 1;
+    avatarStart();
 
     mkdir(APK_DIR, 0777);
 
@@ -592,6 +665,11 @@ int main(int, char**) {
 
                     case BTN_Y:
                         app.rescan();
+                        redraw = true;
+                        break;
+
+                    case BTN_MINUS:
+                        app.showAbout();
                         redraw = true;
                         break;
 

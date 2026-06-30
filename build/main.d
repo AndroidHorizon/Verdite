@@ -232,7 +232,8 @@ main.o: /home/aaron/Documents/Github/BareDroidNX/source/main.cpp \
  /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/portlibs/switch/include/EGL/eglplatform.h \
  /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/portlibs/switch/include/KHR/khrplatform.h \
  /home/aaron/Documents/Github/BareDroidNX/include/compat/jni.h \
- /home/aaron/Documents/Github/BareDroidNX/include/build_number.h
+ /home/aaron/Documents/Github/BareDroidNX/include/build_number.h \
+ /home/aaron/Documents/Github/BareDroidNX/include/avatar.h
 /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/libnx/include/switch.h:
 /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/libnx/include/switch/types.h:
 /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/libnx/include/switch/result.h:
@@ -467,3 +468,4 @@ main.o: /home/aaron/Documents/Github/BareDroidNX/source/main.cpp \
 /run/host/root/home/aaron/.local/share/containers/storage/overlay/5092c05c9c72443b0c1023904ca3095dd98da391290c48e57581e011fb44576a/diff/opt/devkitpro/portlibs/switch/include/KHR/khrplatform.h:
 /home/aaron/Documents/Github/BareDroidNX/include/compat/jni.h:
 /home/aaron/Documents/Github/BareDroidNX/include/build_number.h:
+/home/aaron/Documents/Github/BareDroidNX/include/avatar.h:
