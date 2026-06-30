@@ -95,8 +95,10 @@ struct LoadedSo {
     bool         using_jit = false;
 
     uint8_t*     alloc;       // exec (RX) allocation base pointer
+    uint8_t*     write_alloc; // RW twin of alloc (JitType_CodeMemory: always accessible)
     size_t       alloc_size;
     uint64_t     min_vaddr;   // first PT_LOAD p_vaddr
+    uint64_t     data_vaddr;  // vaddr of first writable PT_LOAD segment (0 if none)
     uint8_t*     base;        // alloc - min_vaddr (exec side; base+vaddr = runtime ptr)
 
     // Heap copies of strtab/symtab so they survive jitTransitionToExecutable

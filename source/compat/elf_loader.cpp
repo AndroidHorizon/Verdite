@@ -187,6 +187,58 @@ static void* resolveSymbol(const char* name) {
 // write_base: where to write relocation results (RW mapping)
 // exec_base:  address values to store in GOT entries (RX mapping)
 // These differ when using JIT dual-mapping; they're equal in the heap fallback.
+// ─── ADRP data-segment redirect ───────────────────────────────────────────────
+// Scans the code segment (write_alloc[0 .. data_alloc_off)) for ADRP instructions
+// that target the exec (RX) side of the data segment, and patches them to target
+// the write (RW) twin instead.  After jitTransitionToExecutable the patched code
+// executes from exec_alloc but computes data addresses in write_alloc — the RW
+// twin is always accessible (JitType_CodeMemory keeps rw_addr mapped permanently).
+static void patchAdrpDataRefs(uint8_t* write_alloc, const uint8_t* exec_alloc,
+                               uint64_t data_alloc_off, size_t alloc_size) {
+    if (data_alloc_off == 0 || data_alloc_off >= alloc_size) return;
+
+    uint64_t rx_base       = (uint64_t)exec_alloc;
+    uint64_t rw_base       = (uint64_t)write_alloc;
+    uint64_t rx_data_start = rx_base + data_alloc_off;
+    uint64_t rx_data_end   = rx_base + alloc_size;
+
+    uint32_t* words  = (uint32_t*)write_alloc;
+    size_t    nwords = data_alloc_off / 4;
+    int       patched = 0, skipped = 0;
+
+    for (size_t i = 0; i < nwords; i++) {
+        uint32_t insn = words[i];
+        // ADRP: bit[31]=1, bits[28:24]=0x10, bits[30:29]=immlo, bits[23:5]=immhi
+        if ((insn & 0x9F000000u) != 0x90000000u) continue;
+
+        uint64_t pc      = rx_base + (uint64_t)i * 4;
+        uint64_t pc_page = pc & ~0xfffULL;
+
+        int64_t immhi = (int64_t)((insn >> 5) & 0x7ffff);
+        int64_t immlo = (int64_t)((insn >> 29) & 3);
+        int64_t imm21 = (immhi << 2) | immlo;
+        if (imm21 & (1LL << 20)) imm21 -= (1LL << 21);  // sign-extend
+
+        uint64_t tgt_page = (uint64_t)((int64_t)pc_page + imm21 * 4096LL);
+        if (tgt_page < rx_data_start || tgt_page >= rx_data_end) continue;
+
+        uint64_t off         = tgt_page - rx_base;
+        uint64_t new_tgt_pag = rw_base + off;
+        int64_t  new_imm21   = ((int64_t)new_tgt_pag - (int64_t)pc_page) / 4096LL;
+
+        if (new_imm21 < -(1 << 20) || new_imm21 >= (1 << 20)) { ++skipped; continue; }
+
+        uint32_t nlo = (uint32_t)(new_imm21 & 3);
+        uint32_t nhi = (uint32_t)((new_imm21 >> 2) & 0x7ffff);
+        words[i] = (insn & 0x9F00001Fu) | (nlo << 29) | (nhi << 5);
+        ++patched;
+    }
+    compatLogFmt("ADRP patch: %d patched %d skipped (data_off=0x%llx rx=%p rw=%p)",
+                 patched, skipped,
+                 (unsigned long long)data_alloc_off,
+                 (void*)exec_alloc, (void*)write_alloc);
+}
+
 static void applyRela(LoadedSo* so, const Elf64_Rela* relas, size_t count,
                       uint8_t* write_base, uint8_t* exec_base,
                       uint8_t* write_alloc, size_t alloc_size,
@@ -321,14 +373,17 @@ LoadedSo* elfLoad(const char* path) {
         return nullptr;
     }
 
-    // Walk PT_LOAD segments to find the virtual address span
+    // Walk PT_LOAD segments to find the virtual address span and first data segment
     const Elf64_Phdr* phdrs = (const Elf64_Phdr*)(file_data + ehdr->e_phoff);
-    uint64_t min_vaddr = UINT64_MAX, max_vaddr = 0;
+    uint64_t min_vaddr      = UINT64_MAX, max_vaddr = 0;
+    uint64_t data_seg_vaddr = UINT64_MAX;  // vaddr of first writable (PF_W) segment
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
         if (phdrs[i].p_vaddr < min_vaddr) min_vaddr = phdrs[i].p_vaddr;
         uint64_t end = phdrs[i].p_vaddr + phdrs[i].p_memsz;
         if (end > max_vaddr) max_vaddr = end;
+        if ((phdrs[i].p_flags & PF_W) && phdrs[i].p_vaddr < data_seg_vaddr)
+            data_seg_vaddr = phdrs[i].p_vaddr;
     }
     if (min_vaddr == UINT64_MAX) {
         free(file_data);
@@ -455,13 +510,15 @@ LoadedSo* elfLoad(const char* path) {
 
     // ── Build LoadedSo — strtab/symtab point into staging buffer ─────────────
     LoadedSo* so = new LoadedSo();
-    so->using_jit  = using_jit;
-    so->jit_mem    = jit_mem;
-    so->alloc      = exec_alloc;
-    so->alloc_size = alloc_size;
-    so->min_vaddr  = min_vaddr;
-    so->base       = exec_base;
-    so->path       = path;
+    so->using_jit   = using_jit;
+    so->jit_mem     = jit_mem;
+    so->alloc       = exec_alloc;
+    so->write_alloc = write_alloc;
+    so->alloc_size  = alloc_size;
+    so->min_vaddr   = min_vaddr;
+    so->data_vaddr  = (data_seg_vaddr != UINT64_MAX) ? data_seg_vaddr : 0;
+    so->base        = exec_base;
+    so->path        = path;
 
     uint32_t sym_count = 0;
     if (strtab_vaddr) so->strtab = (const char*)(stage_base + strtab_vaddr);
@@ -521,6 +578,14 @@ LoadedSo* elfLoad(const char* path) {
         compatLogFmt("ELF: copying stage->JIT rw=%p size=0x%zx", (void*)write_alloc, alloc_size);
         memcpy(write_alloc, stage, alloc_size);
         compatLog("ELF: stage->JIT copy done");
+
+        // Patch ADRP instructions in code segment to redirect data-segment
+        // accesses from the exec (RX) side to the write (RW) twin, so that
+        // stores to globals/singletons succeed instead of faulting.
+        if (data_seg_vaddr != UINT64_MAX && data_seg_vaddr > min_vaddr) {
+            uint64_t data_alloc_off = data_seg_vaddr - min_vaddr;
+            patchAdrpDataRefs(write_alloc, exec_alloc, data_alloc_off, alloc_size);
+        }
     }
     free(stage);
     compatLog("ELF: stage freed");

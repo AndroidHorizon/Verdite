@@ -14,9 +14,10 @@
 #include <stdarg.h>
 
 // Crash recovery shared with elf_loader.cpp and shim_table.cpp
-extern jmp_buf       g_recover_jmp;
-extern volatile bool g_in_recover;
-extern volatile int  g_recover_sig;
+extern jmp_buf        g_recover_jmp;
+extern volatile bool  g_in_recover;
+extern volatile int   g_recover_sig;
+extern volatile uint32_t g_recover_esr;
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 static FILE* g_compat_log = nullptr;
@@ -498,7 +499,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                     compatUiLog("nativeSetPaths: OK");
                 } else {
                     g_in_recover = false;
-                    compatLogFmt("Cocos2d-x: nativeSetPaths FAULT sig=%d", g_recover_sig);
+                    compatLogFmt("Cocos2d-x: nativeSetPaths FAULT sig=%d esr=0x%08x", g_recover_sig, g_recover_esr);
                     compatUiLog("nativeSetPaths: FAULT");
                 }
             } else {
@@ -521,7 +522,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                     compatUiLog("nativeInit: OK");
                 } else {
                     g_in_recover = false;
-                    compatLogFmt("Cocos2d-x: nativeInit FAULT sig=%d", g_recover_sig);
+                    compatLogFmt("Cocos2d-x: nativeInit FAULT sig=%d esr=0x%08x", g_recover_sig, g_recover_esr);
                     compatUiLog("nativeInit: FAULT");
                 }
             } else {
@@ -543,8 +544,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                         g_in_recover = false;
                     } else {
                         g_in_recover = false;
-                        compatLogFmt("Cocos2d-x: nativeRender FAULT sig=%d frame=%d — stop",
-                                     g_recover_sig, frame);
+                        compatLogFmt("Cocos2d-x: nativeRender FAULT sig=%d esr=0x%08x frame=%d — stop",
+                                     g_recover_sig, g_recover_esr, frame);
                         break;
                     }
                     if (g_egl_surface != EGL_NO_SURFACE)
