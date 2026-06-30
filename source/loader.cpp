@@ -423,14 +423,32 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             sizeof(g_compat.asset_mgr.base_path) - 1);
     act->assetManager = &g_compat.asset_mgr;
 
-    // ── 8. Call JNI_OnLoad if present ────────────────────────────────────────
+    // ── 8. Scan libgame for Java_ native methods (helps diagnose JNI-only games)
+    compatLog("Scanning for Java_ native methods in main .so...");
+    if (so->symtab && so->strtab) {
+        int jcount = 0;
+        for (uint32_t i = 1; i < so->sym_count; i++) {
+            const Elf64_Sym& s = so->symtab[i];
+            if (s.st_shndx == SHN_UNDEF || s.st_value == 0) continue;
+            if (so->strsz > 0 && (uint64_t)s.st_name >= so->strsz) continue;
+            const char* sname = so->strtab + s.st_name;
+            if (strncmp(sname, "Java_", 5) == 0) {
+                compatLogFmt("JAVA_METHOD: %s @%p", sname,
+                             (void*)((uint8_t*)so->base + s.st_value));
+                ++jcount;
+            }
+        }
+        compatLogFmt("JAVA_METHOD: %d total Java_ symbols found", jcount);
+    }
+
+    // ── 9. Call JNI_OnLoad if present ────────────────────────────────────────
     typedef int32_t (*JNI_OnLoad_fn)(JavaVM**, void*);
     JNI_OnLoad_fn jni_onload = (JNI_OnLoad_fn)so->findSym("JNI_OnLoad");
     if (jni_onload) {
         compatUiLog("JNI_OnLoad: starting...");
         compatUiSetPct(88);
         if (cb) cb("Calling JNI_OnLoad", "Initialising native library (check log)...");
-        compatLog("Calling JNI_OnLoad...");
+        compatLogFmt("Calling JNI_OnLoad @%p ...", (void*)jni_onload);
         g_in_recover = true; g_recover_sig = 0;
         if (setjmp(g_recover_jmp) == 0) {
             int32_t ver = jni_onload((JavaVM**)g_compat.vm_outer, nullptr);
@@ -450,7 +468,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         compatUiLog("No JNI_OnLoad found");
     }
 
-    // ── 9. Call ANativeActivity_onCreate ─────────────────────────────────────
+    // ── 10. Call ANativeActivity_onCreate (NativeActivity games only) ────────
     typedef void (*OnCreate_fn)(ANativeActivity*, void*, size_t);
     OnCreate_fn on_create = (OnCreate_fn)so->findSym("ANativeActivity_onCreate");
     if (!on_create) {
@@ -458,9 +476,14 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         on_create = (OnCreate_fn)so->findSym(
             "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode");
         if (!on_create) {
-            compatLog("No entry point found — cannot launch");
+            // This is a pure-JNI game (no NativeActivity entry point).
+            // The Java_ methods logged above are the actual entry points.
+            compatLog("No NativeActivity entry point — pure-JNI game (see JAVA_METHOD lines above)");
+            compatUiLog("Pure-JNI game — see JAVA_METHOD in log");
+            if (cb) cb("Pure-JNI game", "Check compat_log.txt for JAVA_METHOD entry points");
             result.errorStage  = "Finding entry point";
-            result.errorDetail = "ANativeActivity_onCreate not exported by this .so.";
+            result.errorDetail = "Pure-JNI game — ANativeActivity_onCreate not exported. "
+                                 "See JAVA_METHOD lines in compat_log.txt for entry points.";
             if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }

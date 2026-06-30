@@ -9,6 +9,12 @@
 #include <signal.h>
 #include <switch/arm/thread_context.h>
 
+// Log helpers — declared before the exception handler so it can use them.
+extern void compatLog(const char* msg);
+extern void compatLogFmt(const char* fmt, ...);
+extern void compatUiLog(const char* msg);
+extern void compatUiSetPct(int pct);
+
 // ─── Shared crash recovery ────────────────────────────────────────────────────
 // Non-static so loader.cpp and shim_table.cpp can also set up recovery scopes.
 // Override libnx's weak __libnx_exception_handler so hardware faults (data
@@ -20,6 +26,14 @@ volatile int  g_recover_sig = 0;
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     if (g_in_recover) {
         g_recover_sig = (int)ctx->error_desc;
+        // Log PC, fault address, and first few GPRs before longjmping so the
+        // next compat_log.txt tells us exactly what each fault was hitting.
+        compatLogFmt("FAULT: pc=0x%llx far=0x%llx x0=0x%llx x1=0x%llx esr=0x%08x",
+                     (unsigned long long)ctx->pc.x,
+                     (unsigned long long)ctx->far.x,
+                     (unsigned long long)ctx->cpu_gprs[0].x,
+                     (unsigned long long)ctx->cpu_gprs[1].x,
+                     (unsigned int)ctx->esr);
         longjmp(g_recover_jmp, 1);
     }
     // Not inside a recovery scope — re-raise as fatal.
@@ -31,12 +45,6 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 static void ctor_crash_handler(int sig) {
     if (g_in_recover) { g_recover_sig = sig; longjmp(g_recover_jmp, 1); }
 }
-
-// Log helpers (shared across compat/ via extern)
-extern void compatLog(const char* msg);
-extern void compatLogFmt(const char* fmt, ...);
-extern void compatUiLog(const char* msg);
-extern void compatUiSetPct(int pct);
 
 // External shim table from shim_table.cpp
 void* shimResolve(const char* name);
