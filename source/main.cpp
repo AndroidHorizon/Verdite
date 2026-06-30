@@ -40,6 +40,7 @@ static const SDL_Color C_DIM    = {100, 100, 120, 255};
 static const SDL_Color C_OK     = {80,  200, 80,  255};
 static const SDL_Color C_ERR    = {220, 80,  80,  255};
 static const SDL_Color C_WARN   = {220, 180, 60,  255};
+static const SDL_Color C_INST   = {60,  200, 100, 255};  // installed badge
 
 // ---------------------------------------------------------------------------
 // Log helpers — writes to SD card so we can inspect errors without a screen
@@ -64,6 +65,7 @@ static void logSDL(const char* prefix) {
 // ---------------------------------------------------------------------------
 static const int BTN_A     = 0;
 static const int BTN_B     = 1;
+static const int BTN_X     = 2;
 static const int BTN_Y     = 3;
 static const int BTN_PLUS  = 10;
 
@@ -305,6 +307,16 @@ struct App {
                 int maxW = SW - tx - 30;
                 drawText(fLg, clamp(fLg, apks[i].appName, maxW), C_WHITE, tx, iy + 14);
 
+                // Installed badge (right side of name row)
+                if (apks[i].installed) {
+                    static const std::string INST = "INSTALLED";
+                    int bw = 0, bh = 0;
+                    TTF_SizeUTF8(fSm, INST.c_str(), &bw, &bh);
+                    int bx = SW - bw - 30;
+                    fill(bx - 6, iy + 14, bw + 12, bh, {20, 60, 30, 200});
+                    drawText(fSm, INST, C_INST, bx, iy + 14);
+                }
+
                 std::string pkgLine =
                     (apks[i].packageName.empty() ? apks[i].filename : apks[i].packageName);
                 if (!apks[i].versionName.empty())
@@ -324,10 +336,10 @@ struct App {
         // Footer
         fill(0, SH - FOOTER_H, SW, FOOTER_H, C_FOOTER);
         if (appletGetOperationMode() == AppletOperationMode_Console) {
-            drawText(fSm, "Docked mode — games need handheld (touch screen) to be playable     +: Quit",
+            drawText(fSm, "Docked — games need handheld (touch screen)     +: Quit",
                 C_WARN, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         } else {
-            drawText(fSm, "A: Launch     Y: Rescan     +: Quit",
+            drawText(fSm, "A: Launch     X: Reinstall     Y: Rescan     +: Quit",
                 C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         }
 
@@ -548,11 +560,25 @@ int main(int, char**) {
                             const ApkInfo& apk = app.apks[app.selected];
                             std::string pkg = apk.packageName.empty()
                                                 ? apk.filename : apk.packageName;
+                            bool skip = apk.installed;
+                            const char* verb = skip ? "Launching (cached)" : "Installing + Launching";
+                            app.showProgress(verb, apk.appName.c_str());
+                            LaunchResult res = launchApk(apk.path, pkg, progressCallback, skip);
+                            // If install happened this run, refresh installed flag for this entry
+                            if (!skip) app.apks[app.selected].installed = true;
+                            app.showLaunchResult(res, app.selected);
+                            redraw = true;
+                        }
+                        break;
 
-                            // Show a "preparing" frame before the loader starts
-                            app.showProgress("Preparing launch", apk.appName.c_str());
-
-                            LaunchResult res = launchApk(apk.path, pkg, progressCallback);
+                    case BTN_X:
+                        if (!app.apks.empty()) {
+                            const ApkInfo& apk = app.apks[app.selected];
+                            std::string pkg = apk.packageName.empty()
+                                                ? apk.filename : apk.packageName;
+                            app.showProgress("Reinstalling", apk.appName.c_str());
+                            LaunchResult res = launchApk(apk.path, pkg, progressCallback, false);
+                            app.apks[app.selected].installed = true;
                             app.showLaunchResult(res, app.selected);
                             redraw = true;
                         }

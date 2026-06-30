@@ -175,8 +175,16 @@ void*        shimResolve(const char* name);
 // Called from jni_env.cpp to install JNI/VM tables into compat layer
 void         jniSetup(CompatLayer* cl);
 
-// High-level launcher — extracts APK, loads libs, runs game.
-// cb is called (if non-null) at each stage so the UI can show progress.
+// Extract APK libs+assets to sdmc:/BareDroidNX/games/<pkg_name>/ and write
+// a .installed marker.  Returns false if the APK cannot be opened.
+// Safe to call even if already installed — just re-extracts.
+bool apkInstall(const std::string& apk_path,
+                const std::string& pkg_name,
+                ProgressCb         cb = nullptr);
+
+// High-level launcher — loads libs and runs the game.
+// If already_installed=true the APK extraction step is skipped entirely.
 LaunchResult launchApk(const std::string& apk_path,
                        const std::string& pkg_name,
-                       ProgressCb         cb = nullptr);
+                       ProgressCb         cb = nullptr,
+                       bool               already_installed = false);

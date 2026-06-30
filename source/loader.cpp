@@ -224,16 +224,38 @@ static bool setupEGL(ANativeWindow* win) {
     return true;
 }
 
+// ─── apkInstall ──────────────────────────────────────────────────────────────
+bool apkInstall(const std::string& apk_path, const std::string& pkg_name, ProgressCb cb) {
+    std::string base_dir  = std::string("sdmc:/BareDroidNX/games/") + pkg_name;
+    mkdirp(base_dir);
+    mkdirp(base_dir + "/lib/");
+    mkdirp(base_dir + "/assets/");
+
+    if (cb) cb("Installing APK", "Extracting libs and assets...");
+    compatLogFmt("apkInstall: %s -> %s", apk_path.c_str(), pkg_name.c_str());
+    if (!extractApk(apk_path, base_dir, cb)) {
+        compatLog("apkInstall: extraction failed");
+        return false;
+    }
+    // Write .installed marker so subsequent launches can skip extraction
+    std::string marker = base_dir + "/.installed";
+    FILE* mf = fopen(marker.c_str(), "w");
+    if (mf) { fputs(apk_path.c_str(), mf); fclose(mf); }
+    compatLog("apkInstall: done — marker written");
+    return true;
+}
+
 // ─── launchApk ───────────────────────────────────────────────────────────────
 LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
-                       ProgressCb cb) {
+                       ProgressCb cb, bool already_installed) {
     LaunchResult result;
 
     std::string log_path = "sdmc:/BareDroidNX/compat_log.txt";
     g_compat_log = fopen(log_path.c_str(), "w");
-    compatLogFmt("launchApk: %s  pkg=%s", apk_path.c_str(), pkg_name.c_str());
+    compatLogFmt("launchApk: %s  pkg=%s  installed=%d",
+                 apk_path.c_str(), pkg_name.c_str(), (int)already_installed);
 
-    // ── 1. Set up directories ────────────────────────────────────────────────
+    // ── 1. Set up directories (always, mkdirp is idempotent) ─────────────────
     std::string base_dir  = std::string("sdmc:/BareDroidNX/games/") + pkg_name;
     std::string lib_dir   = base_dir + "/lib";
     std::string asset_dir = base_dir + "/assets";
@@ -241,17 +263,29 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     mkdirp(lib_dir);
     mkdirp(asset_dir);
 
-    // ── 2. Extract APK ───────────────────────────────────────────────────────
-    compatUiLog("Extracting APK...");
-    compatUiSetPct(2);
-    if (cb) cb("Extracting APK", "Reading libs and assets from APK...");
-    compatLog("Extracting APK...");
-    if (!extractApk(apk_path, base_dir, cb)) {
-        compatLog("Extraction failed");
-        result.errorStage  = "Extracting APK";
-        result.errorDetail = "Could not open or read the APK file.";
-        if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
-        return result;
+    // ── 2. Extract APK (skipped when already installed) ──────────────────────
+    if (!already_installed) {
+        compatUiLog("Extracting APK...");
+        compatUiSetPct(2);
+        if (cb) cb("Installing APK", "Extracting libs and assets from APK...");
+        compatLog("Extracting APK...");
+        if (!extractApk(apk_path, base_dir, cb)) {
+            compatLog("Extraction failed");
+            result.errorStage  = "Extracting APK";
+            result.errorDetail = "Could not open or read the APK file.";
+            if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+            return result;
+        }
+        // Write .installed marker
+        std::string marker = base_dir + "/.installed";
+        FILE* mf = fopen(marker.c_str(), "w");
+        if (mf) { fputs(apk_path.c_str(), mf); fclose(mf); }
+        compatLog("APK installed — marker written");
+    } else {
+        compatUiLog("Using cached install (skip extract)");
+        compatUiSetPct(12);
+        if (cb) cb("Loading cached install", "Skipping APK extraction...");
+        compatLog("Already installed — skipping extraction");
     }
 
     // ── 3. Find all .so files ────────────────────────────────────────────────

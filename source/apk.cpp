@@ -370,6 +370,13 @@ ApkInfo parseApk(const std::string& path) {
     return info;
 }
 
+bool apkIsInstalled(const std::string& pkg_name) {
+    if (pkg_name.empty()) return false;
+    std::string marker = std::string("sdmc:/BareDroidNX/games/") + pkg_name + "/.installed";
+    struct stat st;
+    return stat(marker.c_str(), &st) == 0;
+}
+
 std::vector<ApkInfo> scanApks(const std::string& dir) {
     std::vector<ApkInfo> result;
     DIR* d = opendir(dir.c_str());
@@ -377,8 +384,12 @@ std::vector<ApkInfo> scanApks(const std::string& dir) {
     struct dirent* ent;
     while ((ent = readdir(d))) {
         std::string name = ent->d_name;
-        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".apk") == 0)
-            result.push_back(parseApk(dir + "/" + name));
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".apk") == 0) {
+            ApkInfo info = parseApk(dir + "/" + name);
+            const std::string& pkg = info.packageName.empty() ? info.filename : info.packageName;
+            info.installed = apkIsInstalled(pkg);
+            result.push_back(std::move(info));
+        }
     }
     closedir(d);
     std::sort(result.begin(), result.end(),
