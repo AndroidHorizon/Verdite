@@ -716,12 +716,14 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
         compatLogFmt("ELF: SplitMap memcpy code %p size=0x%zx", (void*)code_heap_buf, code_jit_size);
         compatLogFlush();
         memcpy(code_heap_buf, stage, code_jit_size);
+        armDCacheFlush(code_heap_buf, code_jit_size); // flush D-cache before kernel takes ownership
         compatLog("ELF: code memcpy done");
         compatLogFlush();
         compatUiLog("Copying data segment...");
         compatLogFmt("ELF: SplitMap memcpy data %p size=0x%zx", (void*)data_heap_buf, data_jit_size);
         compatLogFlush();
         memcpy(data_heap_buf, stage + data_off_pg, data_jit_size);
+        armDCacheFlush(data_heap_buf, data_jit_size); // flush D-cache before kernel takes ownership
         compatLog("ELF: data memcpy done");
         compatLogFlush();
 
@@ -798,7 +800,11 @@ LoadedSo* elfLoad(const char* path, ProgressCb cb) {
     if (g_last_svc_perm_code == 0 && this_svc_perm_code != 0)
         g_last_svc_perm_code = this_svc_perm_code;
 
-    __builtin___clear_cache((char*)code_exec, (char*)code_exec + code_jit_size);
+    // Ensure I-cache at exec VA sees the code written through the backing buffer.
+    // armDCacheFlush on the write VA (done above before svcCreateCodeMemory) handled the D-cache;
+    // armICacheInvalidate here ensures the CPU fetches fresh instructions from physical memory.
+    if (using_split_map || using_jit)
+        armICacheInvalidate(code_exec, code_jit_size);
 
     // ── Store DT_INIT / DT_INIT_ARRAY for deferred constructor run ──────────
     // Helper: convert a vaddr to its runtime exec address, accounting for the
