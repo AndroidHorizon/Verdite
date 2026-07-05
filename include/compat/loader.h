@@ -194,6 +194,29 @@ void runGameOnMainThread(void* game_so_ptr,
 // Called from jni_env.cpp to install JNI/VM tables into compat layer
 void         jniSetup(CompatLayer* cl);
 
+// ─── SimpleAudioEngine backend (audio.cpp, SDL2_mixer) ───────────────────────
+// jni_env.cpp forwards the Cocos2dxSound/Cocos2dxMusic JNI calls here.
+void  compatAudioSetAssetsDir(const char* dir);
+void  compatAudioPlayMusic(const char* path, bool loop);
+void  compatAudioStopMusic();
+void  compatAudioPauseMusic();
+void  compatAudioResumeMusic();
+void  compatAudioRewindMusic();
+void  compatAudioSetMusicVolume(float v);
+bool  compatAudioMusicPlaying();
+void  compatAudioPreloadEffect(const char* path);
+void  compatAudioUnloadEffect(const char* path);
+int   compatAudioPlayEffect(const char* path, bool loop);
+void  compatAudioStopEffect(int id);
+void  compatAudioPauseEffect(int id);
+void  compatAudioResumeEffect(int id);
+void  compatAudioStopAllEffects();
+void  compatAudioPauseAllEffects();
+void  compatAudioResumeAllEffects();
+void  compatAudioSetEffectsVolume(float v);
+float compatAudioGetMusicVolume();
+float compatAudioGetEffectsVolume();
+
 // Extract APK libs+assets to sdmc:/AndroidHorizonNX/games/<pkg_name>/ and write
 // a .installed marker.  Returns false if the APK cannot be opened.
 // Safe to call even if already installed — just re-extracts.

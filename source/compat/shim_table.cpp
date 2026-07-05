@@ -22,6 +22,7 @@
 #include <wctype.h>
 #include <locale.h>
 #include <setjmp.h>
+#include <sys/lock.h>
 #include <climits>
 #include <fenv.h>
 #include <poll.h>
@@ -316,8 +317,17 @@ static int android_log_buf_print(int, int, const char* tag, const char* fmt, ...
     va_end(va); return r;
 }
 
-// ─── pthread stubs ───────────────────────────────────────────────────────────
-// Switch (libnx) doesn't expose pthreads.  Single-threaded stubs.
+// ─── pthreads — REAL implementation over libnx/newlib primitives ─────────────
+// The game's asset-loader thread is a persistent worker loop; running it
+// synchronously (the old approach) froze the game on the HCR loading screen.
+// Now pthread_create makes a real libnx thread, and the sync primitives are
+// backed by newlib's recursive locks / condvars *embedded inside the game's
+// own (larger) Bionic structs*:
+//   Bionic pthread_mutex_t = 40 B  ⊇ _LOCK_RECURSIVE_T (8 B, zero-init valid)
+//   Bionic pthread_cond_t  = 48 B  ⊇ _COND_T           (4 B, zero-init valid)
+//   Bionic pthread_rwlock_t= 56 B  ⊇ _LOCK_RECURSIVE_T (writer-lock semantics)
+// Recursive semantics everywhere: cocos2d-x uses std::recursive_mutex, and
+// plain mutexes tolerate it.
 static void* g_pthread_tls[64] = {};
 static int   g_tls_key_count   = 0;
 
@@ -326,38 +336,102 @@ static int   g_tls_key_count   = 0;
 // without faulting (e.g. ios_base::Init accessing [tls+0x28]).
 static uint8_t g_tls_scratch[64][512];
 
+// Bionic's PTHREAD_RECURSIVE/ERRORCHECK_MUTEX_INITIALIZER put the mutex type
+// in bits 14-15 of the first word (0x8000 / 0x4000). To a libnx Mutex that
+// looks like "locked by owner tag 0x8000" — sanitize before first use.
+static _LOCK_RECURSIVE_T* bnxMutex(void* m) {
+    _LOCK_RECURSIVE_T* rl = (_LOCK_RECURSIVE_T*)m;
+    uint32_t v = rl->lock;
+    if ((v == 0x4000 || v == 0x8000 || v == 0xC000) && rl->counter == 0)
+        rl->lock = 0;
+    return rl;
+}
 static int pt_mutex_init(void* m, const void*)  { memset(m, 0, 40); return 0; }
-static int pt_mutex_lock(void*)                  { return 0; }
-static int pt_mutex_unlock(void*)                { return 0; }
-static int pt_mutex_trylock(void*)               { return 0; }
+static int pt_mutex_lock(void* m)                { __libc_lock_acquire_recursive(bnxMutex(m)); return 0; }
+static int pt_mutex_unlock(void* m)              { __libc_lock_release_recursive((_LOCK_RECURSIVE_T*)m); return 0; }
+static int pt_mutex_trylock(void* m)             { return __libc_lock_try_acquire_recursive(bnxMutex(m)) ? 16 /*EBUSY*/ : 0; }
 static int pt_mutex_destroy(void*)               { return 0; }
+
 static int pt_cond_init(void* c, const void*)    { memset(c, 0, 48); return 0; }
-static int pt_cond_signal(void*)                 { return 0; }
-static int pt_cond_broadcast(void*)              { return 0; }
-static int pt_cond_wait(void*, void*)            { return 0; }
-static int pt_cond_timedwait(void*, void*, const void*) { return 0; }
-static int pt_cond_destroy(void*)                { return 0; }
-static int pt_rwlock_init(void* l, const void*)  { memset(l, 0, 56); return 0; }
-static int pt_rwlock_rdlock(void*)               { return 0; }
-static int pt_rwlock_wrlock(void*)               { return 0; }
-static int pt_rwlock_unlock(void*)               { return 0; }
-static int pt_rwlock_destroy(void*)              { return 0; }
-static int pt_create(void** t, const void*, void* (*fn)(void*), void* arg) {
-    // Run the thread function synchronously so any init it does (setting flags,
-    // signalling condvars) completes before pthread_create returns.  Games that
-    // wait for a background init thread via pthread_cond_wait would otherwise
-    // spin forever because the thread never actually started.
-    compatLogFmt("pthread_create: running fn=%p synchronously", (void*)fn);
-    if (fn) {
-        fn(arg);
-        compatLog("pthread_create: fn returned");
-    }
-    if (t) *t = (void*)0x1;
+static int pt_cond_signal(void* c)               { __libc_cond_signal((_COND_T*)c); return 0; }
+static int pt_cond_broadcast(void* c)            { __libc_cond_broadcast((_COND_T*)c); return 0; }
+static int pt_cond_wait(void* c, void* m) {
+    __libc_cond_wait_recursive((_COND_T*)c, bnxMutex(m), UINT64_MAX);
     return 0;
 }
-static int pt_join(void*, void** ret)   { if (ret) *ret = nullptr; return 0; }
-static int pt_detach(void*)             { return 0; }
-static void* pt_self(void)             { return (void*)0x1; }
+// Bionic timespec is ABSOLUTE (CLOCK_REALTIME); convert to a relative wait.
+static int pt_cond_timedwait(void* c, void* m, const struct timespec* abs) {
+    uint64_t delta_ns = 10 * 1000 * 1000;  // fallback: 10 ms
+    if (abs) {
+        struct timeval now;
+        gettimeofday(&now, nullptr);
+        int64_t d = (int64_t)(abs->tv_sec - now.tv_sec) * 1000000000ll +
+                    ((int64_t)abs->tv_nsec - (int64_t)now.tv_usec * 1000ll);
+        delta_ns = d > 0 ? (uint64_t)d : 0;
+    }
+    int r = __libc_cond_wait_recursive((_COND_T*)c, bnxMutex(m), delta_ns);
+    return r ? 110 /* Bionic ETIMEDOUT */ : 0;
+}
+static int pt_cond_destroy(void*)                { return 0; }
+
+static int pt_rwlock_init(void* l, const void*)  { memset(l, 0, 56); return 0; }
+static int pt_rwlock_rdlock(void* l)             { __libc_lock_acquire_recursive(bnxMutex(l)); return 0; }
+static int pt_rwlock_wrlock(void* l)             { __libc_lock_acquire_recursive(bnxMutex(l)); return 0; }
+static int pt_rwlock_unlock(void* l)             { __libc_lock_release_recursive((_LOCK_RECURSIVE_T*)l); return 0; }
+static int pt_rwlock_destroy(void*)              { return 0; }
+
+// Real threads. pthread_t is the address of the embedded libnx Thread, which
+// equals threadGetSelf() inside that thread — so pthread_self()/pthread_equal
+// stay consistent between creator and thread. Worker threads are pinned to
+// cores 1/2 (main renders on core 0): a spinning worker at equal priority on
+// the same core would never yield to the game loop on HOS.
+extern void androidTlsInstallThread();  // loader.cpp — per-thread fake Bionic TLS
+struct GameThread {
+    Thread t;               // must stay first: pthread_t == &gt->t
+    void* (*fn)(void*);
+    void* arg;
+    void* ret;
+};
+static void gameThreadTrampoline(void* p) {
+    GameThread* gt = (GameThread*)p;
+    androidTlsInstallThread();
+    gt->ret = gt->fn ? gt->fn(gt->arg) : nullptr;
+    compatLogFmt("game thread fn=%p exited", (void*)gt->fn);
+}
+static int pt_create(void** t, const void*, void* (*fn)(void*), void* arg) {
+    static int s_core_rr = 0;
+    GameThread* gt = (GameThread*)calloc(1, sizeof(GameThread));
+    if (!gt) return 11;  // EAGAIN
+    gt->fn = fn; gt->arg = arg;
+    int core = 1 + (s_core_rr++ % 2);
+    Result rc = threadCreate(&gt->t, gameThreadTrampoline, gt, nullptr,
+                             1024 * 1024, 0x2C, core);
+    if (R_SUCCEEDED(rc)) rc = threadStart(&gt->t);
+    if (R_FAILED(rc)) {
+        // Last resort: old synchronous behavior, so the game still progresses
+        compatLogFmt("pthread_create: threadCreate/Start failed 0x%x — running fn=%p inline",
+                     rc, (void*)fn);
+        free(gt);
+        if (fn) fn(arg);
+        if (t) *t = (void*)0x1;
+        return 0;
+    }
+    compatLogFmt("pthread_create: real thread fn=%p handle=%p core=%d",
+                 (void*)fn, (void*)&gt->t, core);
+    if (t) *t = &gt->t;
+    return 0;
+}
+static int pt_join(void* th, void** ret) {
+    if (!th || th == (void*)0x1) { if (ret) *ret = nullptr; return 0; }
+    GameThread* gt = (GameThread*)th;  // Thread is the first member
+    threadWaitForExit(&gt->t);
+    if (ret) *ret = gt->ret;
+    threadClose(&gt->t);
+    // gt leaks by design: a stale pthread_t must never point at freed memory
+    return 0;
+}
+static int pt_detach(void*)            { return 0; }  // struct leaks; harmless
+static void* pt_self(void)             { return threadGetSelf(); }
 static int pt_equal(void* a, void* b)  { return a == b ? 1 : 0; }
 static int pt_key_create(int* k, void (*dtor)(void*)) {
     if (g_tls_key_count >= 64) return 11; // EAGAIN
@@ -387,12 +461,15 @@ static int pt_setspecific(int k, const void* v) {
     return 0;
 }
 static int pt_once(int* ctrl, void (*fn)(void)) {
+    static Mutex s_once_lock;
+    mutexLock(&s_once_lock);
     if (*ctrl == 0) {
         compatLogFmt("pthread_once: calling fn @%p", (void*)fn);
-        *ctrl = 1;
         fn();
+        *ctrl = 1;
         compatLog("pthread_once: fn returned");
     }
+    mutexUnlock(&s_once_lock);
     return 0;
 }
 static int pt_attr_init(void* a)    { memset(a, 0, 56); return 0; }
@@ -547,19 +624,37 @@ static int stub_vasprintf(char** out, const char* fmt, va_list va) {
     return n;
 }
 
-// ─── POSIX semaphores (single-threaded stubs) ─────────────────────────────────
-struct BnxSem { volatile int value; };
-static int stub_sem_init(BnxSem* s, int, unsigned int v) { s->value = (int)v; return 0; }
+// ─── POSIX semaphores — real, blocking (game threads are real now) ───────────
+// Bionic sem_t is 16 bytes on LP64; our lock+cond+count fits in 12.
+struct BnxSem { _LOCK_T lock; _COND_T cv; volatile int value; };
+static int stub_sem_init(BnxSem* s, int, unsigned int v) {
+    memset(s, 0, sizeof(BnxSem));
+    s->value = (int)v;
+    return 0;
+}
 static int stub_sem_destroy(BnxSem*) { return 0; }
-static int stub_sem_post(BnxSem* s) { s->value++; return 0; }
+static int stub_sem_post(BnxSem* s) {
+    __libc_lock_acquire(&s->lock);
+    s->value++;
+    __libc_cond_signal(&s->cv);
+    __libc_lock_release(&s->lock);
+    return 0;
+}
 static int stub_sem_wait(BnxSem* s) {
-    if (s->value > 0) { s->value--; return 0; }
-    compatLog("WARN: sem_wait on empty semaphore — pretending it's OK");
+    __libc_lock_acquire(&s->lock);
+    while (s->value <= 0)
+        __libc_cond_wait(&s->cv, &s->lock, UINT64_MAX);
+    s->value--;
+    __libc_lock_release(&s->lock);
     return 0;
 }
 static int stub_sem_trywait(BnxSem* s) {
-    if (s->value > 0) { s->value--; return 0; }
-    errno = EAGAIN; return -1;
+    int r = 0;
+    __libc_lock_acquire(&s->lock);
+    if (s->value > 0) s->value--;
+    else { errno = EAGAIN; r = -1; }
+    __libc_lock_release(&s->lock);
+    return r;
 }
 
 // ─── Network stubs (no BSD socket service configured) ────────────────────────

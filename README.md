@@ -61,7 +61,7 @@ The full pipeline that works today:
 - Live on-screen log feed during loading, full diagnostics in `sdmc:/AndroidHorizonNX/compat_log.txt`, and **automatic screenshots** of key moments saved to `sdmc:/AndroidHorizonNX/screenshots/`
 - Crash forensics: symbolized abort/exit backtraces, unrecovered-fault PC capture, and the game's own debug output routed into the log
 
-The current frontier: at ~165s the game deliberately calls `abort()` from inside its statically-linked libc++ right after its daily-missions bookkeeping — the classic `-fno-exceptions` "`__throw_system_error` becomes abort" pattern. The instrumented build captures a full backtrace to pin down the exact call site. Audio is silent (the Java-side SimpleAudioEngine is stubbed) and touch input is not delivered yet.
+The journey so far, each root-caused on real hardware: JIT data pages needed RW after the executable transition (417 ctor faults) → `std::random_device` aborted because `/dev/urandom` doesn't exist (now served by the Switch CSRNG) → the asset-loader thread froze the game because `pthread_create` ran it inline (threads are real libnx threads now). As of 0.1.59 the game reaches its **Terms-of-Service screen fully loaded and rendering**, and the build adds touch input and SDL2_mixer audio — the first potentially *playable* build.
 
 ---
 
@@ -205,8 +205,8 @@ First real measured numbers from hardware:
 - [x] **Crash forensics** — symbolized abort/exit backtraces, unrecovered-fault PC capture, game stderr + debug strings routed to compat log
 - [x] **Automatic screenshots** — launcher screens + GL framebuffer at milestone frames saved to `sdmc:/AndroidHorizonNX/screenshots/`
 - [ ] Fix the ~165s `abort()` (libc++ `__throw_system_error` path — backtrace instrumentation in place)
-- [ ] Real touch input delivery via `AInputQueue` / `ALooper`
-- [ ] Audio playback (SimpleAudioEngine JNI calls → SDL/audren)
+- [x] **Touch input delivered** — SDL finger events → Cocos2dxRenderer touch natives (1:1 coords); B button → Android BACK key
+- [x] **Audio playback** — SDL2_mixer backend for SimpleAudioEngine (music + effects, OGG/MP3/Opus/FLAC)
 
 ### Phase 1 — Touch input
 
@@ -242,6 +242,20 @@ First real measured numbers from hardware:
 ## Changelog
 
 > Most recent first.
+
+### 0.1.59 — Touch + audio
+
+- [x] **Real threads worked** — build 56 reached the game's Terms-of-Service / privacy screen: fully loaded, rendering, interactive (2,280 frames over 339 s in the test run, clean exit via +). The remaining gaps were input and sound.
+- [x] **Touch input** — SDL finger events are forwarded to the game's registered `Cocos2dxRenderer` natives: `nativeTouchesBegin`/`End` per finger, `nativeTouchesMove` with real JNI arrays (the fake JNI array layer now implements `GetArrayLength` and all typed `Get/SetArrayRegion` calls instead of returning zeros). Touchscreen coordinates map 1:1 to the game's 1280×720 surface.
+- [x] **B button → Android BACK key** via `nativeKeyDown(AKEYCODE_BACK)` — backs out of game menus like on a phone.
+- [x] **Audio** — new SDL2_mixer backend (`source/compat/audio.cpp`) behind all SimpleAudioEngine JNI calls: background music (play/stop/pause/resume/rewind/volume) and sound effects (preload/play/stop/volume, cached chunks), OGG/MP3/Opus/FLAC decoding, reading straight from the extracted APK assets.
+
+### 0.1.56 — Real threads
+
+- [x] **The urandom fix worked** — build 55 sailed past the old ~170s abort: `std::random_device` now reads the Switch CSRNG, and the game went on to initialize vehicles, achievements, and event assets. New blocker: it spawned a persistent asset-loader thread, and the old "run thread functions synchronously" shim froze the game on the HCR loading screen.
+- [x] **`pthread_create` now creates real threads** (libnx `threadCreate`, 1 MB stack, pinned to cores 1/2 so workers can't starve the render loop on core 0), each with its own fake Bionic TLS block. `pthread_self`/`pthread_equal`/`pthread_join` are consistent between creator and thread.
+- [x] **Real synchronization** — mutexes/condvars/rwlocks/semaphores are now backed by newlib/libnx primitives embedded inside the game's larger Bionic structs (recursive semantics; Bionic's static recursive-initializer bit pattern sanitized). `pthread_cond_timedwait` converts Bionic absolute timeouts and returns Bionic's `ETIMEDOUT`.
+- [x] **Thread-safety hardening** — the compat logger and the JNI UserDefault store are mutex-guarded; crash recovery only `longjmp`s on the thread that armed it (worker faults get the symbolized unrecovered-fault log instead).
 
 ### 0.1.55 — Abort root-caused: `/dev/urandom`
 

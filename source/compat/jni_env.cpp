@@ -46,9 +46,16 @@ static MethodEntry* lookupOrCreateMethod(const char* n, const char* sg) {
 }
 
 // ─── UserDefault in-memory store (Cocos2d-x SharedPreferences emulation) ─────
+// Game threads are real (see shim_table pt_create) and JNI calls arrive from
+// worker threads too — serialize map access.
 static std::unordered_map<std::string, int>         g_int_store;
 static std::unordered_map<std::string, std::string> g_str_store;
 static std::set<std::string> g_logged_int_keys;   // suppress per-call spam
+static Mutex g_store_lock;
+struct StoreLock {
+    StoreLock()  { mutexLock(&g_store_lock); }
+    ~StoreLock() { mutexUnlock(&g_store_lock); }
+};
 
 // ─── All JNI stubs (must be defined before jniSetup uses their addresses) ─────
 
@@ -154,6 +161,7 @@ static jint s_CallStaticIntMethodV(JNIEnv*, jclass, jmethodID mid, va_list args)
         const char* key = (const char*)va_arg(args, jstring);
         jint defval    = va_arg(args, jint);
         if (key) {
+            StoreLock sl;
             auto it = g_int_store.find(key);
             if (it != g_int_store.end()) {
                 compatLogFmt("JNI getIntegerForKey(%s) → %d (stored)", key, it->second);
@@ -164,6 +172,12 @@ static jint s_CallStaticIntMethodV(JNIEnv*, jclass, jmethodID mid, va_list args)
                 compatLogFmt("JNI getIntegerForKey(%s) → %d (default)", key, defval);
         }
         return defval;
+    }
+    // SimpleAudioEngine: playEffect(path, loop, pitch, pan[, gain]) → effect id
+    if (e && strcmp(e->name, "playEffect") == 0) {
+        const char* p = (const char*)va_arg(args, jstring);
+        int loop      = va_arg(args, int);
+        return compatAudioPlayEffect(p, loop != 0);
     }
     return 0;
 }
@@ -184,6 +198,8 @@ static jboolean s_CallStaticBoolMethodV(JNIEnv*, jclass, jmethodID mid, va_list)
             compatLogFmt("JNI %s() → true", e->name);
             return JNI_TRUE;
         }
+        if (strcmp(e->name, "isBackgroundMusicPlaying") == 0)
+            return compatAudioMusicPlaying() ? JNI_TRUE : JNI_FALSE;
         compatLogFmt("JNI CallStaticBooleanMethodV: %s → false", e->name);
     }
     return JNI_FALSE;
@@ -203,14 +219,14 @@ static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID mid, va_list args
         const char* key = (const char*)va_arg(args, jstring);
         jint val        = va_arg(args, jint);
         compatLogFmt("JNI setIntegerForKey(%s, %d)", key ? key : "?", val);
-        if (key) { g_int_store[key] = val; g_logged_int_keys.erase(key); }
+        if (key) { StoreLock sl; g_int_store[key] = val; g_logged_int_keys.erase(key); }
         return;
     }
     if (strcmp(e->name, "setStringForKey") == 0) {
         const char* key = (const char*)va_arg(args, jstring);
         const char* val = (const char*)va_arg(args, jstring);
         compatLogFmt("JNI setStringForKey(%s, \"%s\")", key ? key : "?", val ? val : "null");
-        if (key) g_str_store[key] = val ? val : "";
+        if (key) { StoreLock sl; g_str_store[key] = val ? val : ""; }
         return;
     }
     if (strcmp(e->name, "flush") == 0) {
@@ -222,6 +238,44 @@ static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID mid, va_list args
         compatLogFmt("game debug: %s", msg ? msg : "null");
         return;
     }
+
+    // ── SimpleAudioEngine (Cocos2dxSound / Cocos2dxMusic) → audio.cpp ──
+    // Note: jboolean promotes to int and jfloat to double in va_lists.
+    if (strcmp(e->name, "playBackgroundMusic") == 0) {
+        const char* p = (const char*)va_arg(args, jstring);
+        int loop      = va_arg(args, int);
+        compatAudioPlayMusic(p, loop != 0);
+        return;
+    }
+    if (strcmp(e->name, "preloadBackgroundMusic") == 0) { va_arg(args, jstring); return; }
+    if (strcmp(e->name, "stopBackgroundMusic") == 0)    { compatAudioStopMusic(); return; }
+    if (strcmp(e->name, "pauseBackgroundMusic") == 0)   { compatAudioPauseMusic(); return; }
+    if (strcmp(e->name, "resumeBackgroundMusic") == 0)  { compatAudioResumeMusic(); return; }
+    if (strcmp(e->name, "rewindBackgroundMusic") == 0)  { compatAudioRewindMusic(); return; }
+    if (strcmp(e->name, "setBackgroundMusicVolume") == 0) {
+        compatAudioSetMusicVolume((float)va_arg(args, double));
+        return;
+    }
+    if (strcmp(e->name, "preloadEffect") == 0) {
+        compatAudioPreloadEffect((const char*)va_arg(args, jstring));
+        return;
+    }
+    if (strcmp(e->name, "unloadEffect") == 0) {
+        compatAudioUnloadEffect((const char*)va_arg(args, jstring));
+        return;
+    }
+    if (strcmp(e->name, "setEffectsVolume") == 0) {
+        compatAudioSetEffectsVolume((float)va_arg(args, double));
+        return;
+    }
+    if (strcmp(e->name, "stopEffect") == 0)      { compatAudioStopEffect(va_arg(args, int)); return; }
+    if (strcmp(e->name, "pauseEffect") == 0)     { compatAudioPauseEffect(va_arg(args, int)); return; }
+    if (strcmp(e->name, "resumeEffect") == 0)    { compatAudioResumeEffect(va_arg(args, int)); return; }
+    if (strcmp(e->name, "stopAllEffects") == 0)  { compatAudioStopAllEffects(); return; }
+    if (strcmp(e->name, "pauseAllEffects") == 0) { compatAudioPauseAllEffects(); return; }
+    if (strcmp(e->name, "resumeAllEffects") == 0){ compatAudioResumeAllEffects(); return; }
+    if (strcmp(e->name, "end") == 0) { compatAudioStopMusic(); compatAudioStopAllEffects(); return; }
+
     compatLogFmt("JNI CallStaticVoidMethodV: %s %s", e->name, e->sig);
 }
 static void s_CallStaticVoidMethod(JNIEnv* env, jclass cls, jmethodID mid, ...) {
@@ -238,6 +292,7 @@ static jobject s_CallStaticObjectMethodV(JNIEnv*, jclass, jmethodID mid, va_list
         const char* key    = (const char*)va_arg(args, jstring);
         const char* defval = (const char*)va_arg(args, jstring);
         if (key) {
+            StoreLock sl;
             auto it = g_str_store.find(key);
             if (it != g_str_store.end()) {
                 compatLogFmt("JNI getStringForKey(%s) → stored", key);
@@ -249,6 +304,7 @@ static jobject s_CallStaticObjectMethodV(JNIEnv*, jclass, jmethodID mid, va_list
     if (strcmp(e->name, "retrieveDefaultsString") == 0) {
         const char* key = (const char*)va_arg(args, jstring);
         if (key) {
+            StoreLock sl;
             auto it = g_str_store.find(key);
             if (it != g_str_store.end()) return (jobject)it->second.c_str();
         }
@@ -309,8 +365,8 @@ static const jchar* s_GetStringCritical(JNIEnv*, jstring, jboolean* cp) {
 }
 static void    s_ReleaseStringCritical(JNIEnv*, jstring, const jchar*) {}
 
-// Arrays
-static jsize s_GetArrayLength(JNIEnv*, jarray) { return 0; }
+// Arrays — blob layout is [jint len][payload]; len counts ELEMENTS.
+static jsize s_GetArrayLength(JNIEnv*, jarray a) { return a ? *(jint*)a : 0; }
 static jbyteArray s_NewByteArray(JNIEnv*, jsize len) {
     uint8_t* p = (uint8_t*)calloc(1, 4 + (size_t)(len > 0 ? len : 0));
     if (p && len > 0) *(jint*)p = len;
@@ -342,8 +398,16 @@ static void  s_GetByteRegion(JNIEnv*, jbyteArray a, jsize st, jsize l, jbyte* bu
 static void  s_SetByteRegion(JNIEnv*, jbyteArray a, jsize st, jsize l, const jbyte* buf) {
     if (a && buf) memcpy((uint8_t*)a + 4 + st, buf, (size_t)l);
 }
-static void  s_GetArrayRegion(JNIEnv*, jarray, jsize, jsize, void*) {}
-static void  s_SetArrayRegion(JNIEnv*, jarray, jsize, jsize, const void*) {}
+// Typed regions: the JNIEnv table has one slot per element type, so bake the
+// element size into each function (cocos2d-x touch dispatch uses Int/Float).
+template <size_t ES>
+static void s_GetRegionT(JNIEnv*, jarray a, jsize st, jsize l, void* buf) {
+    if (a && buf && l > 0) memcpy(buf, (uint8_t*)a + 4 + (size_t)st * ES, (size_t)l * ES);
+}
+template <size_t ES>
+static void s_SetRegionT(JNIEnv*, jarray a, jsize st, jsize l, const void* buf) {
+    if (a && buf && l > 0) memcpy((uint8_t*)a + 4 + (size_t)st * ES, buf, (size_t)l * ES);
+}
 
 static void* s_GetPrimArrayCritical(JNIEnv*, jarray a, jboolean* cp) {
     if (cp) *cp = JNI_FALSE;
@@ -525,12 +589,22 @@ void jniSetup(CompatLayer* cl) {
     g_jni_funcs[189] = (void*)s_GetElements;
     g_jni_funcs[190] = (void*)s_GetElements;
     for (int i = 191; i <= 198; i++) g_jni_funcs[i] = (void*)s_ReleaseElements;
-    g_jni_funcs[199] = (void*)s_GetArrayRegion;
+    g_jni_funcs[199] = (void*)s_GetRegionT<1>;   // Boolean
     g_jni_funcs[200] = (void*)s_GetByteRegion;
-    for (int i = 201; i <= 206; i++) g_jni_funcs[i] = (void*)s_GetArrayRegion;
-    g_jni_funcs[207] = (void*)s_SetArrayRegion;
+    g_jni_funcs[201] = (void*)s_GetRegionT<2>;   // Char
+    g_jni_funcs[202] = (void*)s_GetRegionT<2>;   // Short
+    g_jni_funcs[203] = (void*)s_GetRegionT<4>;   // Int
+    g_jni_funcs[204] = (void*)s_GetRegionT<8>;   // Long
+    g_jni_funcs[205] = (void*)s_GetRegionT<4>;   // Float
+    g_jni_funcs[206] = (void*)s_GetRegionT<8>;   // Double
+    g_jni_funcs[207] = (void*)s_SetRegionT<1>;
     g_jni_funcs[208] = (void*)s_SetByteRegion;
-    for (int i = 209; i <= 214; i++) g_jni_funcs[i] = (void*)s_SetArrayRegion;
+    g_jni_funcs[209] = (void*)s_SetRegionT<2>;
+    g_jni_funcs[210] = (void*)s_SetRegionT<2>;
+    g_jni_funcs[211] = (void*)s_SetRegionT<4>;
+    g_jni_funcs[212] = (void*)s_SetRegionT<8>;
+    g_jni_funcs[213] = (void*)s_SetRegionT<4>;
+    g_jni_funcs[214] = (void*)s_SetRegionT<8>;
     // Misc 215-232
     g_jni_funcs[215] = (void*)s_RegisterNatives;
     g_jni_funcs[216] = (void*)s_UnregisterNatives;

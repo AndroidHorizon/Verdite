@@ -27,6 +27,7 @@ alignas(16) static uint8_t g_android_tls_sub[512];  // sub-buffer for tls[0x28]
 // Crash recovery shared with elf_loader.cpp and shim_table.cpp
 extern jmp_buf        g_recover_jmp;
 extern volatile bool     g_in_recover;
+extern volatile void*    g_recover_owner;
 extern volatile int      g_recover_sig;
 extern volatile uint32_t g_recover_esr;
 extern volatile uint64_t g_recover_pc;
@@ -40,6 +41,10 @@ static std::string g_apk_path_stored;
 // ─── Logging ──────────────────────────────────────────────────────────────────
 static FILE*   g_compat_log   = nullptr;
 static uint64_t g_log_start_t = 0;   // armGetSystemTick() at launch start
+
+// Game threads are real now (pt_create → libnx Thread), so log calls arrive
+// concurrently — serialize the dedup state and FILE* behind a mutex.
+static Mutex g_log_lock;
 
 // Dedup state: collapse consecutive identical lines into "msg x<N>"
 static char g_log_last[512] = {};
@@ -86,17 +91,22 @@ static void logFlushDedup() {
 // Force the current pending log message to disk and detail buffer immediately,
 // without waiting for the next different message to trigger the dedup flush.
 void compatLogFlush() {
+    mutexLock(&g_log_lock);
     logFlushDedup();
+    mutexUnlock(&g_log_lock);
 }
 
 void compatLog(const char* msg) {
+    mutexLock(&g_log_lock);
     if (g_log_repeat > 0 && strcmp(msg, g_log_last) == 0) {
         g_log_repeat++;
+        mutexUnlock(&g_log_lock);
         return;
     }
     logFlushDedup();
     snprintf(g_log_last, sizeof(g_log_last), "%s", msg);
     g_log_repeat = 1;
+    mutexUnlock(&g_log_lock);
 }
 
 void compatLogFmt(const char* fmt, ...) {
@@ -117,6 +127,19 @@ static void androidTlsInstall() {
     *(void**)(g_android_tls + 0x28) = g_android_tls_sub; // slot 5: EH/locale state
     uint64_t new_tp = (uint64_t)g_android_tls;
     asm volatile("msr tpidr_el0, %0" :: "r"(new_tp) : "memory");
+}
+
+// Same fake-TLS layout, but a private heap block for a game worker thread —
+// called by the pthread_create trampoline in shim_table.cpp so each real
+// thread gets its own Bionic per-thread state (errno slot, EH/locale slot).
+// The block intentionally leaks: game threads are few and effectively live
+// for the whole session.
+void androidTlsInstallThread() {
+    uint8_t* blk = (uint8_t*)calloc(1, 1024);
+    if (!blk) return;
+    *(void**)(blk + 0x00) = blk;          // TLS_SLOT_SELF
+    *(void**)(blk + 0x28) = blk + 512;    // slot 5: EH/locale state
+    asm volatile("msr tpidr_el0, %0" :: "r"((uint64_t)blk) : "memory");
 }
 
 // ─── UI ring buffer ───────────────────────────────────────────────────────────
@@ -568,6 +591,10 @@ void runGameOnMainThread(void* game_so_ptr,
     // runGameOnMainThread runs on the main thread where TPIDR_EL0 is still 0.
     androidTlsInstall();
 
+    // SimpleAudioEngine paths are asset-relative — point audio.cpp at the
+    // extracted APK assets.
+    compatAudioSetAssetsDir((data_path + "/assets").c_str());
+
     // Capture SDL2's active EGL context (current on this main thread).
     g_egl_display = eglGetCurrentDisplay();
     g_egl_surface = eglGetCurrentSurface(EGL_DRAW);
@@ -588,7 +615,7 @@ void runGameOnMainThread(void* game_so_ptr,
     JNI_OnLoad_fn jni_onload = (JNI_OnLoad_fn)so->findSym("JNI_OnLoad");
     if (jni_onload) {
         compatLogFmt("Calling JNI_OnLoad @%p ...", (void*)jni_onload);
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             int32_t ver = jni_onload((JavaVM**)g_compat.vm_outer, nullptr);
             g_in_recover = false;
@@ -613,7 +640,7 @@ void runGameOnMainThread(void* game_so_ptr,
     if (on_create) {
         ANativeActivity* act = &g_compat.activity;
         compatLogFmt("ANativeActivity_onCreate @%p", (void*)on_create);
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             on_create(act, nullptr, 0);
             g_in_recover = false;
@@ -650,7 +677,7 @@ void runGameOnMainThread(void* game_so_ptr,
         "Java_org_cocos2dx_lib_Cocos2dxActivity_nativeSetPaths");
     if (setPaths) {
         compatLogFmt("Cocos2d-x: nativeSetPaths @%p", (void*)setPaths);
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             setPaths(env, obj, (jstring)apk_path.c_str(), (jstring)data_path.c_str());
             g_in_recover = false;
@@ -677,7 +704,7 @@ void runGameOnMainThread(void* game_so_ptr,
             "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeResize");
     if (nativeInit) {
         compatLogFmt("Cocos2d-x: nativeInit @%p 1280x720", (void*)nativeInit);
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             nativeInit(env, obj, 1280, 720);
             g_in_recover = false;
@@ -728,6 +755,28 @@ void runGameOnMainThread(void* game_so_ptr,
     typedef void (*NativeRender_fn)(JNIEnv*, jobject);
     NativeRender_fn nativeRender = (NativeRender_fn)so->findSym(
         "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
+
+    // ─── Touch input: SDL finger events → Cocos2dxRenderer touch natives ─────
+    // The Java GLSurfaceView would normally deliver these; we call the game's
+    // registered native entry points directly. Begin/End take a single id+xy;
+    // Move/Cancel take JNI arrays (blob layout: [jint len][payload]).
+    typedef void     (*TouchBE_fn)(JNIEnv*, jobject, jint, jfloat, jfloat);
+    typedef void     (*TouchArr_fn)(JNIEnv*, jobject, void*, void*, void*);
+    typedef jboolean (*KeyDown_fn)(JNIEnv*, jobject, jint);
+    TouchBE_fn  touchBegin = (TouchBE_fn)so->findSym(
+        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesBegin");
+    TouchBE_fn  touchEnd = (TouchBE_fn)so->findSym(
+        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesEnd");
+    TouchArr_fn touchMove = (TouchArr_fn)so->findSym(
+        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeTouchesMove");
+    KeyDown_fn  keyDown = (KeyDown_fn)so->findSym(
+        "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeKeyDown");
+    compatLogFmt("touch: begin=%p end=%p move=%p keyDown=%p",
+                 (void*)touchBegin, (void*)touchEnd, (void*)touchMove, (void*)keyDown);
+
+    struct IntArr1   { jint len; jint   v[1]; };
+    struct FloatArr1 { jint len; jfloat v[1]; };
+
     if (nativeRender) {
         compatLogFmt("Cocos2d-x: nativeRender @%p — game loop", (void*)nativeRender);
         compatLogFlush();
@@ -736,7 +785,7 @@ void runGameOnMainThread(void* game_so_ptr,
             // Recovery window covers the whole iteration (event poll, render,
             // swap) — a fault inside eglSwapBuffers/SDL used to rethrow to the
             // OS with nothing in the log.
-            g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+            g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
             if (setjmp(g_recover_jmp) == 0) {
                 // Poll SDL events so + button exits
                 SDL_Event ev;
@@ -745,6 +794,21 @@ void runGameOnMainThread(void* game_so_ptr,
                         (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 10 /*PLUS*/)) {
                         g_in_recover = false;
                         goto game_loop_done;
+                    }
+                    // B button → Android BACK key (cocos routes it to menus)
+                    if (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == 1 /*B*/ && keyDown)
+                        keyDown(env, obj, 4 /*AKEYCODE_BACK*/);
+                    if (ev.type == SDL_FINGERDOWN && touchBegin)
+                        touchBegin(env, obj, (jint)ev.tfinger.fingerId,
+                                   ev.tfinger.x * 1280.0f, ev.tfinger.y * 720.0f);
+                    if (ev.type == SDL_FINGERUP && touchEnd)
+                        touchEnd(env, obj, (jint)ev.tfinger.fingerId,
+                                 ev.tfinger.x * 1280.0f, ev.tfinger.y * 720.0f);
+                    if (ev.type == SDL_FINGERMOTION && touchMove) {
+                        IntArr1   ids = {1, {(jint)ev.tfinger.fingerId}};
+                        FloatArr1 xs  = {1, {ev.tfinger.x * 1280.0f}};
+                        FloatArr1 ys  = {1, {ev.tfinger.y * 720.0f}};
+                        touchMove(env, obj, &ids, &xs, &ys);
                     }
                 }
 

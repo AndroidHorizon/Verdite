@@ -19,6 +19,7 @@ extern void compatUiSetPct(int pct);
 // ─── Shared crash recovery ────────────────────────────────────────────────────
 jmp_buf           g_recover_jmp;
 volatile bool     g_in_recover  = false;
+volatile void*    g_recover_owner = nullptr;  // thread that armed the jmp_buf
 volatile int      g_recover_sig = 0;
 volatile uint32_t g_recover_esr = 0;
 volatile uint64_t g_recover_pc  = 0;
@@ -29,7 +30,9 @@ static void logUnrecoveredFault(ThreadExceptionDump* ctx);
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     uint32_t esr = ctx->esr;
 
-    if (g_in_recover) {
+    // Only longjmp on the thread that armed the jmp_buf — game worker threads
+    // are real now, and unwinding another thread's setjmp would corrupt both.
+    if (g_in_recover && (void*)threadGetSelf() == g_recover_owner) {
         g_recover_sig = (int)ctx->error_desc;
         g_recover_esr = esr;
         g_recover_pc  = ctx->pc.x;
@@ -115,7 +118,7 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     // DT_INIT runs before DT_INIT_ARRAY (same as Android linker order)
     if (so->init_fn) {
         compatLogFmt("ELF: %s: DT_INIT @%p", soname, (void*)so->init_fn);
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0;
         if (setjmp(g_recover_jmp) == 0) {
             so->init_fn();
             g_in_recover = false;
@@ -151,7 +154,7 @@ void elfRunCtors(LoadedSo* so, ProgressCb cb) {
 
         compatLogFmt("ELF: ctor[%zu/%zu] @%p", k+1, n, (void*)fn);
         compatLogFlush();
-        g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
+        g_recover_owner = threadGetSelf(); g_in_recover = true; g_recover_sig = 0; g_recover_esr = 0; g_recover_far = 0;
         if (setjmp(g_recover_jmp) == 0) {
             fn();
             g_in_recover = false;
