@@ -1,38 +1,40 @@
-Android Horizon NX Source Available License v1.0
+Android Horizon NX Free & Source-Available License v1.0
 Copyright (c) 2026 Aaronateataco (aaron@aaronworld.uk)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to use,
-copy, modify, merge, publish, and distribute the Software or derivative works,
-subject to ALL of the following conditions:
+copy, modify, merge, publish, distribute, and sub-license the Software or 
+derivative works, subject to the following conditions:
 
-1. ATTRIBUTION
-   All copies, forks, ports, or derivative works — whether source or binary —
-   must prominently credit "Aaronateataco" as the original author of
-   Android Horizon NX in any readme, about screen, credits section, or
-   equivalent user-visible location.
+1. PROMINENT ATTRIBUTION
+   All copies, forks, ports, or derivative works—whether distributed in source 
+   or binary form—must prominently credit "Aaronateataco" as the original 
+   author of Android Horizon NX. This credit must be clearly visible in the 
+   repository readme, the application’s "About" or "Credits" screen, or an 
+   equivalent, easily accessible user-visible location.
 
-2. NO PAYWALLING
-   The Software and any fork, port, or derivative work may NOT be placed behind
-   a paywall, subscription, paid download, or any other mechanism that requires
-   payment in exchange for access to the software itself. This prohibition
-   covers direct sales, app-store purchases, locked downloads, and any scheme
-   that conditions access on payment.
+2. ABSOLUTE PROHIBITION OF SALES
+   Neither the Software nor any fork, port, or derivative work built upon it 
+   may be sold, commercialized, placed behind a paywall, or distributed via 
+   any mechanism that requires payment, paid subscriptions, or ads-for-access. 
+   Access to the software and its features must remain 100% free of charge.
 
-3. VOLUNTARY MONETIZATION EXCEPTION
-   Notwithstanding Section 2, tip jars, donation links, and voluntary "support
-   the developer" buttons are explicitly permitted. Forks and derivative works
-   may replace the original author's tip/donation link with their own, provided
-   the attribution requirement in Section 1 is still met.
+3. VOLUNTARY SUPPORT EXCEPTION
+   Notwithstanding Section 2, voluntary donation methods such as tip jars, 
+   Ko-fi/Patreon links, or "support the developer" buttons are explicitly 
+   permitted. Creators of forks or derivative works may utilize their own 
+   donation links, provided all attribution and free-access rules are maintained.
 
-4. SOURCE AVAILABILITY
-   Any publicly distributed binary or compiled form of the Software or a
-   derivative work must be accompanied by, or provide a publicly accessible
-   link to, the corresponding complete source code.
+4. SHARE-ALIKE & SOURCE AVAILABILITY
+   You may only distribute forks, ports, or derivative works under this exact 
+   same license. You cannot re-license this code. Furthermore, any publicly 
+   distributed binary or compiled form of the Software or its derivatives must 
+   be accompanied by a publicly accessible link to its complete, unedited 
+   source code.
 
 5. LICENSE PRESERVATION
-   This license text must be included in all copies or substantial portions of
-   the Software and in any derivative work.
+   This complete license text must be included in all copies, substantial 
+   portions, or derivative works of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR

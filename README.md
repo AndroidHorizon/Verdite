@@ -6,7 +6,7 @@
 
 **Run Android games natively on Nintendo Switch Horizon OS — without Android**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Source Available](https://img.shields.io/badge/License-Source__Available-orange.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Aaronateataco/AndroidHorizonNX?style=social)](https://github.com/Aaronateataco/AndroidHorizonNX/stargazers)
 [![Status](https://img.shields.io/badge/status-pre--alpha-red.svg)](#status)
 [![Built with Claude AI](https://img.shields.io/badge/built%20with-Claude%20AI-orange.svg)](https://anthropic.com)
@@ -262,13 +262,15 @@ This section gets replaced with real measured numbers once the game boots far en
 
 ## License
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+This project is licensed under the Android Horizon NX Free & Source-Available License v1.0 - see [LICENSE](LICENSE) for the full text.
 
-This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for the full text.
+In plain English: This project is 100% free for the community to use, copy, modify, and share. However, you are strictly forbidden from selling this code, its ports, or any derivative works. If you fork or modify this project, you must prominently credit Aaronateataco, keep your source code publicly available, and distribute your version under this exact same license.
 
-**In plain English:** You can use, copy, modify, share, and even sell this code freely, as long as you keep the copyright notice. There is no warranty — if it breaks your Switch, that's on you (please use CFW responsibly).
+Voluntary donations/tips are perfectly fine, but the software itself must always remain free.
 
-The MIT license does **not** cover the Android games themselves — those belong to their respective developers. Android Horizon only provides the compatibility layer.
+There is no warranty — if it breaks your Switch, that's on you (please use CFW responsibly).
+
+The license does not cover the Android games themselves — those belong to their respective developers. Android Horizon only provides the compatibility layer.
 
 ---
 
