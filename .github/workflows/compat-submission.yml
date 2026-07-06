@@ -1,0 +1,44 @@
+name: Process compatibility report
+
+# Fires on every new issue; the job itself only proceeds if the issue form
+# auto-applied the `compat-report` label (see
+# .github/ISSUE_TEMPLATE/game-compatibility-report.yml) — this intentionally
+# does NOT trigger on 'labeled' too, so manually re-labeling an unrelated
+# issue can't accidentally re-run the pipeline against it.
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  process:
+    if: contains(github.event.issue.labels.*.name, 'compat-report')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run automated analysis + publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: a classic PAT with repo access to the org, needed to
+          # push results cross-repo to AndroidHorizon/compat-reports. If this
+          # isn't set, the analysis still runs but the submission is left
+          # open with a `needs-manual-review` label instead of being
+          # published — see the script for the exact fallback behavior.
+          ORG_PAT: ${{ secrets.ORG_PAT }}
+          REPO_FULL: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_USER: ${{ github.event.issue.user.login }}
+          # Passed as an env var (never interpolated into a shell string) so
+          # arbitrary/untrusted issue-body content can't be used for command
+          # injection — the script only ever reads it via os.environ.
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: python3 .github/scripts/process_compat_submission.py

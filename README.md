@@ -252,6 +252,19 @@ The launcher now tags each scanned APK by architecture automatically and blocks 
 
 **If you want another game supported:** the process that got Hill Climb Racing working was: provide the `.apk` (and any `.obb`/expansion file), then real hardware iteration — extract it, see what JNI calls and native symbols it actually makes, implement/stub what's missing, rebuild, test on your Switch, repeat. That loop needs a real APK to extract and real hardware to test against; it's not something to fake from documentation alone. Send over an APK for whichever game you have in mind and that process can start for real.
 
+### Submitting your own test results
+
+Open a [Game compatibility report](https://github.com/AndroidHorizon/AndroidHorizonNX/issues/new?template=game-compatibility-report.yml) issue with a direct `.apk` link and your three log files (`launcher_log.txt`, `compat_log.txt`, `log.txt`). It's processed entirely by automation (`.github/workflows/compat-submission.yml` + `.github/scripts/process_compat_submission.py`):
+
+1. Rejects the submission if the APK link doesn't end in `.apk`, doesn't download, or isn't a valid ZIP.
+2. Extracts the game's icon straight from the APK's `res/mipmap*`/`res/drawable*` entries.
+3. Checks the Play Store listing for the package name and rejects it if Play Store categorizes it as a non-game app.
+4. Runs the three logs through the same kind of analysis used to chase the frame-stall work above — counts stalls/severe stalls, scans for known crash/error signatures, and checks whether the game ever actually rendered a frame — to produce a verdict (Playable / Runs with issues / Fails to launch / Inconclusive).
+5. Commits the logs + a generated report to [compat-reports](https://github.com/AndroidHorizon/compat-reports) and updates the data the [compatibility page](https://androidhorizon.github.io/website/compatibility.html) renders. A repeat submission for the same package+version **overwrites** the previous one — only the latest result per version is kept.
+6. Posts a one-comment summary and **closes + locks the issue** — it's a data intake form, not a discussion thread.
+
+This needs an `ORG_PAT` repo secret (a classic PAT with `repo` scope across the org) configured on this repo to actually publish to `compat-reports` — without it, the analysis still runs but the issue is left open, labeled `needs-manual-review`, with the results posted as a comment instead.
+
 ---
 
 ## TODO / Roadmap
@@ -347,6 +360,14 @@ If this approach proves out across many games (not just Hill Climb Racing), the 
 ## Changelog
 
 > Most recent first.
+
+### 0.1.122 — Automated game compatibility submission pipeline
+
+- [x] **A structured "Game compatibility report" issue form** on this repo — asks for the APK link, source site, package/version, and all three log files, auto-labeled `compat-report`.
+- [x] **A fully automated processing workflow** (`compat-submission.yml` + `process_compat_submission.py`): validates the APK link (must end in `.apk`), downloads and sniffs it's a real ZIP, extracts the game's icon, checks the Play Store category to reject non-games, and runs the same kind of stall/crash analysis used to chase frame-stall bugs above to produce an automatic verdict.
+- [x] Results (logs + a generated report + an icon) are committed to a new **[compat-reports](https://github.com/AndroidHorizon/compat-reports)** repo, which the website's compatibility page now renders as a second, community-submitted table. A repeat submission for the same package+version overwrites the older one entirely — only the latest result per version survives.
+- [x] The originating issue gets one summary comment, then is **closed and locked** — it's a data intake form, not a discussion thread.
+- [x] Publishing needs an `ORG_PAT` repo secret; without it the analysis still runs and posts its results as a comment, just left open and labeled `needs-manual-review` instead of published.
 
 ### 0.1.121 — Touch navigation, in-app contributor credits, and the project website
 

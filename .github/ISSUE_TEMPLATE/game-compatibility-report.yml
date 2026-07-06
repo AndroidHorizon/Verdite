@@ -1,0 +1,94 @@
+name: Game compatibility report
+description: Submit test results (with logs) for a game you tried on Android Horizon.
+title: "[Compat] "
+labels: ["compat-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! This form is processed **automatically** — a bot will download the APK, extract its icon, check it's actually a game, run your logs through an automated pass/fail/performance analysis, and either add it to the [compatibility page](https://androidhorizon.github.io/website/compatibility.html) or explain why it couldn't. This issue will be **closed and locked automatically** once that's done — it's a data submission, not a discussion thread. If you want to discuss something, please open a separate issue.
+
+        You need **all three** log files from `sdmc:/AndroidHorizonNX/`:
+        - `launcher_log.txt`
+        - `compat_log.txt`
+        - `log.txt` (from `sdmc:/AndroidHorizonNX/<package>/log.txt`, written by the Translation Core)
+
+  - type: input
+    id: game_name
+    attributes:
+      label: Game name
+      description: The game's display name, e.g. "Hill Climb Racing"
+      placeholder: Hill Climb Racing
+    validations:
+      required: true
+
+  - type: input
+    id: package_name
+    attributes:
+      label: Package name
+      description: The Android package ID, e.g. com.fingersoft.hillclimb (check the APK's filename or the launcher's APK list — it's shown under each game's title)
+      placeholder: com.fingersoft.hillclimb
+    validations:
+      required: true
+
+  - type: input
+    id: version_name
+    attributes:
+      label: Game version
+      description: The version you tested (shown in the launcher's APK list, or the APK's filename)
+      placeholder: 1.67.0
+    validations:
+      required: true
+
+  - type: input
+    id: apk_url
+    attributes:
+      label: APK download URL
+      description: A direct link to the .apk file you tested (must end in .apk — split/.xapk packages aren't supported yet). Submissions with a non-.apk link are rejected automatically.
+      placeholder: https://example.com/path/to/game.apk
+    validations:
+      required: true
+
+  - type: input
+    id: source_site
+    attributes:
+      label: Where did this APK come from?
+      description: The site/store you downloaded it from, e.g. "APKMirror", "APKPure", "official developer site"
+      placeholder: APKMirror
+    validations:
+      required: true
+
+  - type: textarea
+    id: launcher_log
+    attributes:
+      label: launcher_log.txt
+      description: Paste the full contents of sdmc:/AndroidHorizonNX/launcher_log.txt
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: compat_log
+    attributes:
+      label: compat_log.txt
+      description: Paste the full contents of sdmc:/AndroidHorizonNX/compat_log.txt
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: core_log
+    attributes:
+      label: log.txt (Translation Core)
+      description: Paste the full contents of sdmc:/AndroidHorizonNX/<package>/log.txt
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else worth knowing?
+      description: Optional — what you saw on screen, what worked, what didn't, controller used, docked/handheld, etc.
+    validations:
+      required: false
