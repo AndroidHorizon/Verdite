@@ -318,8 +318,12 @@ def main():
         fail(f"couldn't read meta.json for {submission_id} ({e})")
         return
 
+    # Whether this was a pasted link or a directly-attached file, the Worker
+    # always resolves it to a plain https URL by the time it lands here — a
+    # presigned R2 GET URL for uploads (valid a few hours, long enough for
+    # the Actions queue), or the submitter's own link otherwise. Either way
+    # this script just downloads a URL; it doesn't need to know which.
     apk_url = (meta_in.get("apk_url") or "").strip()
-    apk_uploaded = bool(meta_in.get("apk_uploaded"))
     source_site = (meta_in.get("source_site") or "").strip()
     github_username = (meta_in.get("github_username") or "").strip()
     notes = (meta_in.get("notes") or "").strip()
@@ -335,27 +339,20 @@ def main():
     compat_log = read_log("compat_log.txt")
     core_log = read_log("core_log.txt")
 
-    uploaded_apk_path = os.path.join(pending_dir, "game.apk")
-    has_uploaded_apk = apk_uploaded and os.path.exists(uploaded_apk_path)
+    if not apk_url or not source_site or not (launcher_log and compat_log and core_log):
+        fail("missing required fields (apk_url / source_site / one or more logs)")
+        return
 
-    if not source_site or not (launcher_log and compat_log and core_log) or not (apk_url or has_uploaded_apk):
-        fail("missing required fields (apk_url/uploaded APK / source_site / one or more logs)")
+    parsed = urllib.parse.urlparse(apk_url)
+    if parsed.scheme not in ("http", "https"):
+        fail(f"apk_url isn't a valid http(s) link: {apk_url}")
         return
 
     apk_path = os.path.join(workdir, "game.apk")
-    if has_uploaded_apk:
-        # The Worker already wrote the raw bytes straight from the browser —
-        # no download needed, just use them directly.
-        shutil.copy(uploaded_apk_path, apk_path)
-    else:
-        parsed = urllib.parse.urlparse(apk_url)
-        if parsed.scheme not in ("http", "https"):
-            fail(f"apk_url isn't a valid http(s) link: {apk_url}")
-            return
-        ok, http_code, err = download_apk(apk_url, apk_path)
-        if not ok:
-            fail(f"couldn't download the APK ({err or 'unknown error'})")
-            return
+    ok, http_code, err = download_apk(apk_url, apk_path)
+    if not ok:
+        fail(f"couldn't download the APK ({err or 'unknown error'})")
+        return
 
     with open(apk_path, "rb") as f:
         apk_bytes = f.read()
@@ -404,10 +401,15 @@ def main():
         icon_rel = "icon" + os.path.splitext(icon_path)[1]
         shutil.copy(icon_path, os.path.join(target, icon_rel))
 
+    # A directly-attached upload resolves to a presigned R2 URL, which is
+    # long, ugly, and dead within hours — not worth keeping in a report
+    # that's meant to be readable indefinitely.
+    apk_url_display = "(uploaded directly, no link)" if "r2.cloudflarestorage.com" in apk_url else apk_url
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     meta = {
         "game_name": app_name, "package_name": pkg, "version_name": ver,
-        "apk_url": apk_url if apk_url else "(uploaded directly, no link)",
+        "apk_url": apk_url_display,
         "apk_sha256": apk_sha256, "source_site": source_site,
         "submitted_by": github_username or "anonymous", "submitted_at": now,
         "notes": notes, "play_store_category_check": play_status,
