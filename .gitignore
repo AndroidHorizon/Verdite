@@ -12,3 +12,4 @@ build/
 *.pfs0
 *.nso
 testingbuild/
+__pycache__/
