@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -80,7 +81,7 @@ static const int BTN_MINUS = 11;
 //   username:contributions
 //   #Next category title
 //   ...
-struct Contributor { std::string name; int contributions; };
+struct Contributor { std::string name; int contributions; SDL_Texture* avatar = nullptr; };
 struct ContributorCategory { std::string title; std::vector<Contributor> people; };
 
 // ---------------------------------------------------------------------------
@@ -125,8 +126,10 @@ struct App {
 
     // Credits (About screen), loaded once from romfs at startup.
     std::vector<ContributorCategory> contributors;
-    float  creditsScroll    = 0.0f;
-    Uint32 lastCreditsStick = 0;
+    std::vector<SDL_Texture*> contributorAvatarTextures; // owns every unique avatar texture, for cleanup()
+    float  creditsScroll     = 0.0f;
+    Uint32 lastCreditsStick  = 0;
+    Uint32 lastCreditsInput  = 0; // last manual scroll input; auto-scroll only kicks in once idle
 
     // ------------------------------------------------------------------
     TTF_Font* openFont(int ptsize) {
@@ -235,6 +238,32 @@ struct App {
         }
         fclose(f);
         logMsg(("contributors.txt loaded: " + std::to_string(contributors.size()) + " categories").c_str());
+        loadContributorAvatars();
+    }
+
+    // CI bakes one romfs:/avatars/<name>.png per unique contributor/tester
+    // into the NRO alongside contributors.txt (see release.yml) — no network
+    // fetch at runtime, same "bundled, not fetched" philosophy as the single
+    // About-screen avatar already used. A name can appear in more than one
+    // category (e.g. a coder who also tested a game), so textures are loaded
+    // once per unique name and shared by reference across rows.
+    void loadContributorAvatars() {
+        for (auto* t : contributorAvatarTextures) if (t) SDL_DestroyTexture(t);
+        contributorAvatarTextures.clear();
+        std::map<std::string, SDL_Texture*> byName;
+        for (auto& cat : contributors) {
+            for (auto& p : cat.people) {
+                auto it = byName.find(p.name);
+                if (it != byName.end()) { p.avatar = it->second; continue; }
+                std::string path = "romfs:/avatars/" + p.name + ".png";
+                SDL_Surface* surf = IMG_Load(path.c_str());
+                SDL_Texture* tex = surf ? SDL_CreateTextureFromSurface(rdr, surf) : nullptr;
+                if (surf) SDL_FreeSurface(surf);
+                byName[p.name] = tex;
+                if (tex) contributorAvatarTextures.push_back(tex);
+                p.avatar = tex;
+            }
+        }
     }
 
     void cleanup() {
@@ -242,6 +271,7 @@ struct App {
         if (avatarTex) SDL_DestroyTexture(avatarTex);
         if (bgTex) SDL_DestroyTexture(bgTex);
         for (auto* t : icons) if (t) SDL_DestroyTexture(t);
+        for (auto* t : contributorAvatarTextures) if (t) SDL_DestroyTexture(t);
         if (fBtn) TTF_CloseFont(fBtn);
         if (fLg)  TTF_CloseFont(fLg);
         if (fMd && fMd != fSm) TTF_CloseFont(fMd);
@@ -406,15 +436,21 @@ struct App {
     void drawContributors(int top) {
         if (contributors.empty()) return;
         const int CAT_H    = 34;
-        const int PERSON_H = 26;
+        const int PERSON_H = 34;
         const int GAP_H    = 16;
+        const int AV_SZ    = 28;
 
         int total = 0;
         for (auto& cat : contributors) total += CAT_H + (int)cat.people.size() * PERSON_H + GAP_H;
 
         int viewH = (SH - FOOTER_H - 10) - top;
         int maxScroll = std::max(0, total - viewH);
-        creditsScroll = std::clamp(creditsScroll, 0.0f, (float)maxScroll);
+        // Wrap rather than clamp — lets the auto-scroll (and a manual scroll
+        // run off either end) loop back around like a real credits reel
+        // instead of getting stuck at the top/bottom.
+        if (maxScroll <= 0)            creditsScroll = 0.0f;
+        else if (creditsScroll > (float)maxScroll) creditsScroll = 0.0f;
+        else if (creditsScroll < 0.0f)             creditsScroll = (float)maxScroll;
 
         SDL_Rect clip = {0, top, SW, viewH};
         SDL_RenderSetClipRect(rdr, &clip);
@@ -427,13 +463,20 @@ struct App {
             y += CAT_H;
             for (auto& p : cat.people) {
                 if (y + PERSON_H >= top && y < top + viewH) {
-                    drawText(fSm, p.name, C_WHITE, cx + 16, y + 4);
+                    int avY = y + (PERSON_H - AV_SZ) / 2;
+                    if (p.avatar) {
+                        SDL_Rect dst = {cx, avY, AV_SZ, AV_SZ};
+                        SDL_RenderCopy(rdr, p.avatar, nullptr, &dst);
+                    } else {
+                        drawMonogram(p.name, cx, avY, AV_SZ);
+                    }
+                    drawText(fSm, p.name, C_WHITE, cx + AV_SZ + 12, y + (PERSON_H - 18) / 2);
                     if (p.contributions > 0) {
                         std::string cnt = std::to_string(p.contributions) +
                                           (p.contributions == 1 ? " commit" : " commits");
                         int cw = 0, ch = 0;
                         TTF_SizeUTF8(fSm, cnt.c_str(), &cw, &ch);
-                        drawText(fSm, cnt, C_DIM, cx + 440 - cw, y + 4);
+                        drawText(fSm, cnt, C_DIM, cx + 440 - cw, y + (PERSON_H - 18) / 2);
                     }
                 }
                 y += PERSON_H;
@@ -635,7 +678,8 @@ struct App {
     // ------------------------------------------------------------------
     void showAbout() {
         bool done = false;
-        creditsScroll = 0.0f;
+        creditsScroll    = 0.0f;
+        lastCreditsInput = SDL_GetTicks();
         while (!done) {
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
@@ -647,14 +691,14 @@ struct App {
                     { done = true; }
 
                 if (ev.type == SDL_JOYHATMOTION) {
-                    if (ev.jhat.value & SDL_HAT_DOWN) creditsScroll += 40.0f;
-                    if (ev.jhat.value & SDL_HAT_UP)   creditsScroll -= 40.0f;
+                    if (ev.jhat.value & SDL_HAT_DOWN) { creditsScroll += 40.0f; lastCreditsInput = SDL_GetTicks(); }
+                    if (ev.jhat.value & SDL_HAT_UP)   { creditsScroll -= 40.0f; lastCreditsInput = SDL_GetTicks(); }
                 }
                 if (ev.type == SDL_JOYAXISMOTION && ev.jaxis.axis == 1) {
                     Uint32 now = SDL_GetTicks();
                     if (now - lastCreditsStick > 90) {
-                        if (ev.jaxis.value > 16384)       { creditsScroll += 24.0f; lastCreditsStick = now; }
-                        else if (ev.jaxis.value < -16384) { creditsScroll -= 24.0f; lastCreditsStick = now; }
+                        if (ev.jaxis.value > 16384)       { creditsScroll += 24.0f; lastCreditsStick = now; lastCreditsInput = now; }
+                        else if (ev.jaxis.value < -16384) { creditsScroll -= 24.0f; lastCreditsStick = now; lastCreditsInput = now; }
                     }
                 }
 
@@ -667,11 +711,19 @@ struct App {
                 if (ev.type == SDL_FINGERMOTION) {
                     creditsScroll -= ev.tfinger.dy * SH;
                     touchDragging = true;
+                    lastCreditsInput = SDL_GetTicks();
                 }
                 if (ev.type == SDL_FINGERUP && !touchDragging) {
                     done = true;
                 }
             }
+
+            // Rolls on its own like end credits once the visitor's left it
+            // alone for a bit — any manual scroll above resets the idle
+            // timer, so it never fights input while someone's actually
+            // reading a specific section.
+            if (!contributors.empty() && SDL_GetTicks() - lastCreditsInput > 2500)
+                creditsScroll += 0.6f;
 
             std::vector<uint8_t> img;
             if (avatarPollNewImage(img)) {

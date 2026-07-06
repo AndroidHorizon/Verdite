@@ -91,6 +91,22 @@ jobs:
           echo "--- contributors.txt ---"
           cat launcher/romfs/contributors.txt
 
+      - name: Fetch contributor/tester avatars for in-app credits
+        run: |
+          # One small PNG per unique name baked into the NRO — same
+          # "bundled, not fetched at runtime" approach as the existing
+          # About-screen avatar (see avatar.cpp). github.com/<user>.png is a
+          # stable public shortcut to a user's current avatar, no API/auth
+          # needed.
+          mkdir -p launcher/romfs/avatars
+          grep -v '^#' launcher/romfs/contributors.txt | cut -d: -f1 | sort -u | while read -r name; do
+            [ -z "$name" ] && continue
+            curl -sL --max-time 15 -o "launcher/romfs/avatars/${name}.png" \
+              "https://github.com/${name}.png?size=64" || true
+          done
+          echo "--- avatars fetched ---"
+          ls -la launcher/romfs/avatars/
+
       - name: Build launcher
         run: docker run --rm -v ${{ github.workspace }}/launcher:/project -w /project devkitpro/devkita64:latest make
 
