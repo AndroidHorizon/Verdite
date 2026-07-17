@@ -971,7 +971,6 @@ struct App {
         // from launcher_log.txt instead of a guess.
         bool hasNext = envHasNextLoad();
         logMsg(hasNext ? "envHasNextLoad: true" : "envHasNextLoad: FALSE — chain-load unsupported in this launch context");
-        const std::string& pkg = apk.packageName.empty() ? apk.filename : apk.packageName;
         // argv[0] MUST be the Core's own real path, not our package name —
         // libnx's romfsInit() falls back to argv[0] to find and open its own
         // .nro file on the SD card and read its embedded RomFS section from
