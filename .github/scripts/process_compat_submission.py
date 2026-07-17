@@ -182,7 +182,34 @@ def extract_icon(apk_path, out_path_no_ext):
     return out_path
 
 
-def check_play_store_category(package):
+def detect_arch(apk_path):
+    """Which Switch engine build this APK targets, from its bundled native
+    libs: arm64-v8a → x64 (the only one that runs today); armeabi-v7a/x86 with
+    no arm64 → x32 (blocked at launch, but tracked so the website's x32/x64 tabs
+    can group it); no lib/ folder → x64 by default (pure-Java/Kotlin, would run
+    under the 64-bit engine). Mirrors the launcher's own ApkArch scan."""
+    import zipfile
+    saw_arm64 = saw_other = False
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            for n in z.namelist():
+                if n.startswith("lib/arm64-v8a/"):
+                    saw_arm64 = True
+                elif n.startswith("lib/") and n.count("/") >= 2:
+                    saw_other = True
+    except zipfile.BadZipFile:
+        return "unknown"
+    if saw_arm64:
+        return "x64"
+    return "x32" if saw_other else "x64"
+
+
+def check_play_store(package):
+    """Returns (category_check, is_mature). category_check is GAME / NOT_GAME /
+    NOT_FOUND / UNKNOWN as before; is_mature is True when the Play listing's
+    content rating reads as mature (18+ / adults) so the website can blur it
+    for a family-friendly default. There's no clean ratings API, so this reads
+    the public store page — best-effort, defaults to not-mature on any doubt."""
     url = f"https://play.google.com/store/apps/details?id={urllib.parse.quote(package)}&hl=en&gl=US"
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -191,16 +218,23 @@ def check_play_store_category(package):
         with urllib.request.urlopen(req, timeout=20) as resp:
             status, html = resp.status, resp.read().decode("utf-8", errors="ignore")
     except urllib.error.HTTPError as e:
-        return "NOT_FOUND" if e.code == 404 else "UNKNOWN"
+        return ("NOT_FOUND" if e.code == 404 else "UNKNOWN"), False
     except Exception:
-        return "UNKNOWN"
+        return "UNKNOWN", False
     if status != 200:
-        return "UNKNOWN"
+        return "UNKNOWN", False
+    low = html.lower()
+    # Content-rating signals seen on the store page: PEGI 18, ESRB Mature/AO,
+    # USK 16/18, "Rated for 18+", "Adults only".
+    mature = any(s in low for s in (
+        "pegi 18", "rated for 18+", "mature 17+", "adults only 18+",
+        "esrb: mature", "esrb: adults", "usk: 18", "usk: 16", "rated for 17+",
+    ))
     if "/store/apps/category/GAME" in html:
-        return "GAME"
+        return "GAME", mature
     if "/store/apps/category/" in html:
-        return "NOT_GAME"
-    return "UNKNOWN"
+        return "NOT_GAME", mature
+    return "UNKNOWN", mature
 
 
 def parse_env_header(compat_log):
@@ -422,7 +456,8 @@ def main():
         return
 
     icon_path = extract_icon(apk_path, os.path.join(workdir, "icon"))
-    play_status = check_play_store_category(package)
+    arch = detect_arch(apk_path)
+    play_status, is_mature = check_play_store(package)
     if play_status == "NOT_GAME":
         fail(f"Play Store lists {package} as a non-game app, not a game")
         return
@@ -472,6 +507,7 @@ def main():
         "superseded_submission_by": old_meta.get("submitted_by") if old_meta else None,
         **env_info,
         "apk_integrity_check": apk_integrity_check,
+        "arch": arch, "mature": is_mature,
     }
     with open(os.path.join(target, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -493,6 +529,7 @@ def main():
         "source_site": source_site,
         "submitted_by": github_username if github_username else "",
         "submitted_at": now, "report_path": f"reports/{pkg}/{ver}/report.md",
+        "arch": arch, "mature": is_mature,
     })
     games.sort(key=lambda g: g["game_name"].lower())
     with open(games_json_path, "w") as f:
