@@ -29,10 +29,25 @@ import urllib.request
 from datetime import datetime, timezone
 
 VERDICT_LABEL = {
+    "flawless": "✨ Flawless",
     "ok":      "✅ Playable",
     "issues":  "⚠️ Runs with issues",
     "fail":    "❌ Fails to launch",
     "unknown": "❓ Inconclusive",
+}
+
+# Manually curated verdicts that win over the automatic log analysis. Some
+# titles are validated far more thoroughly by hand than a single log can show
+# (e.g. a game that plays perfectly but logs benign first-load stalls). Keyed by
+# package name → (verdict, summary).
+VERDICT_OVERRIDES = {
+    "com.fingersoft.hillclimb": (
+        "flawless",
+        "Flawless — plays end to end on real hardware: driving, physics, saves, "
+        "audio, and touch steering all work. (The in-game Shop can crash if "
+        "reopened several times in one session; it exits cleanly and doesn't "
+        "affect gameplay.)",
+    ),
 }
 
 STALL_RE = re.compile(r'(stall|STALL\(severe\)): frame (\d+) stalled for (\d+)ms')
@@ -470,6 +485,12 @@ def main():
 
     pkg = safe_path_component(package)
     ver = safe_path_component(version_name)
+
+    # Manual curation wins over automatic log analysis (see VERDICT_OVERRIDES) —
+    # applied before both the report and games.json consume the verdict.
+    if package in VERDICT_OVERRIDES:
+        analysis["verdict"], analysis["summary"] = VERDICT_OVERRIDES[package]
+
     target = os.path.join(reports_dir, "reports", pkg, ver)
 
     old_meta = None
