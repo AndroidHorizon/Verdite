@@ -24,6 +24,16 @@ static const char* APK_DIR = "sdmc:/Viridite/apks";
 static const char* CORE_X64_PATH = "sdmc:/switch/Viridite/Viridite-Translation-Core-x64.nro";
 static const char* CORE_X32_PATH = "sdmc:/switch/Viridite/Viridite-Translation-Core-x32.nro";
 
+// Compatibility allowlist. The translation layer is validated end-to-end for
+// exactly these titles right now; every other APK boots far enough to look like
+// it might work and then fails in game-specific ways, so we mark them
+// incompatible up front rather than let someone chase a crash we already know
+// about. Keyed by package id.
+static bool isCompatibleGame(const std::string& pkg) {
+    return pkg == "com.fingersoft.hillclimb"   // Hill Climb Racing (cocos2d-x)
+        || pkg == "com.orbital.brainiton";     // Brain It On! (Unity IL2CPP)
+}
+
 // ---------------------------------------------------------------------------
 // Layout (1280×720) — matches the Translation Core's own UI exactly so the
 // chain-load between the two feels like a single continuous app.
@@ -622,9 +632,14 @@ struct App {
                     drawMonogram(apks[i].appName, 28, iconY, ICON_SZ);
                 }
 
+                const std::string& rowPkg =
+                    apks[i].packageName.empty() ? apks[i].filename : apks[i].packageName;
+                bool rowCompatible = isCompatibleGame(rowPkg);
+
                 int tx   = 28 + ICON_SZ + 16;
                 int maxW = SW - tx - 40;
-                SDL_Color nameCol = (apks[i].arch == ApkArch::Arm32Only) ? C_DIM : C_WHITE;
+                SDL_Color nameCol = (apks[i].arch == ApkArch::Arm32Only || !rowCompatible)
+                                    ? C_DIM : C_WHITE;
                 drawText(fLg, clamp(fLg, apks[i].appName, maxW), nameCol, tx, iy + 14);
 
                 if (apks[i].arch == ApkArch::Arm32Only) {
@@ -634,6 +649,13 @@ struct App {
                     int bx = SW - bw - 40;
                     fill(bx - 6, iy + 14, bw + 12, bh, {255, 238, 210, 220});
                     drawText(fSm, TAG, C_WARN, bx, iy + 14);
+                } else if (!rowCompatible) {
+                    static const std::string TAG = "INCOMPATIBLE";
+                    int bw = 0, bh = 0;
+                    TTF_SizeUTF8(fSm, TAG.c_str(), &bw, &bh);
+                    int bx = SW - bw - 40;
+                    fill(bx - 6, iy + 14, bw + 12, bh, {253, 226, 226, 220});
+                    drawText(fSm, TAG, C_ERR, bx, iy + 14);
                 } else if (apks[i].installed) {
                     static const std::string INST = "INSTALLED";
                     int bw = 0, bh = 0;
@@ -913,6 +935,15 @@ struct App {
     // Returning from main() after this call lets hbloader perform the switch.
     bool launchGame(const ApkInfo& apk, bool* outHandled) {
         *outHandled = false;
+        const std::string& pkg =
+            apk.packageName.empty() ? apk.filename : apk.packageName;
+        if (!isCompatibleGame(pkg)) {
+            noticeText  = "This game isn't compatible yet — only Hill Climb Racing "
+                          "and Brain It On! are supported in this build.";
+            noticeUntil = SDL_GetTicks() + 7000;
+            logMsg(("launch blocked (incompatible): " + pkg).c_str());
+            return false;
+        }
         if (apk.arch == ApkArch::Arm32Only) {
             noticeText  = "32-bit binaries aren't supported at the moment — "
                           "there isn't enough public documentation to support "
